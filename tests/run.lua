@@ -62,6 +62,11 @@ M.files["maps/rp_test.bsp"] = F.Map({
     { material = "maps/skyface", verts = quad(100, 100, 128, 32), flags = 0x4 }, -- sky: never drawn lit
     { material = "maps/nodraw", verts = quad(100, 100, 120, 32), flags = 0x80 },
     { material = CORRIGATED, verts = quad(800, 100, 128, 32) },
+    -- A listed light fixture as the map compiler copies it for a cubemap.
+    { material = "maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8", verts = quad(120, 60, 0, 32) },
+    { material = "maps/rp_test/maps/hull_500_-2000_64", verts = quad(500, -2000, 64, 64) }, -- copy on the outside
+    -- A listed fixture in a room far from any section box: goes out anyway.
+    { material = "maps/rp_test/lights/white_2000_2000_64", verts = quad(2000, 2000, 64, 32) },
     { material = "maps/stairs", verts = { { 0, 0, 300 }, { 90, 0, 300 }, { 0, 90, 300 } } }
 }, {
     { model = "models/props/console.mdl", pos = { 100, 100, 10 } },
@@ -87,6 +92,11 @@ M.materials = {
     ["maps/stairs"] = { shader = "LightmappedGeneric", params = {} },
     ["maps/door"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
     [CORRIGATED] = { shader = "LightmappedGeneric", params = { ["$basetexture"] = tex(CORRIGATED) } },
+    ["maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8"] = { shader = "LightmappedGeneric", params = { ["$basetexture"] = tex("kingpommes/startrek/intrepid/eng_floorlight"), ["$envmap"] = "maps/rp_test/c120_-40_8" } },
+    ["maps/rp_test/lights/white_2000_2000_64"] = { shader = "UnlitGeneric", params = { ["$basetexture"] = tex("lights/white") } },
+    ["maps/rp_test/maps/hull_500_-2000_64"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
+    -- Listed, but on nothing the scan finds (a model only a map entity uses, say).
+    ["models/kingpommes/startrek/intrepid/light_white"] = { shader = "VertexLitGeneric", params = { ["$basetexture"] = tex("models/kingpommes/startrek/intrepid/light_white") } },
     ["models/props/console"] = { shader = "VertexLitGeneric", params = { ["$phong"] = 1, ["$phongboost"] = 2, ["$envmap"] = "env_cubemap" } },
     ["models/props/console_screen"] = { shader = "VertexLitGeneric", params = { ["$flags"] = SELFILLUM, ["$basetexture"] = tex("models/props/console_screen") } },
     ["models/props/asteroid"] = { shader = "VertexLitGeneric", params = { ["$color2"] = V(1, 1, 1) } },
@@ -252,7 +262,7 @@ step("reading the map's files", function()
     local ok = LE.ScanMap(function(name, center, faceArea) table.insert(faces, { name, center, faceArea }) end,
         function(model, pos) table.insert(props, { model, pos }) end, function() end)
     check(ok, "map read")
-    check(#faces == 12, "12 drawn faces, sky and nodraw skipped: " .. #faces)
+    check(#faces == 15, "15 drawn faces, sky and nodraw skipped: " .. #faces)
     check(faces[1][1] == "maps/floor" and vnear(faces[1][2], 100, 100, 0) and near(faces[1][3], 4096), "face material, center and area")
     check(vnear(faces[#faces][2], 30, 30, 300), "a triangle's center (edges stored both ways round)")
     check(#props == 4 and props[1][1] == "models/props/console.mdl" and vnear(props[1][2], 100, 100, 10), "static props and positions")
@@ -330,9 +340,14 @@ step("deck 1 without power: props, entities and glow", function()
     check(P(c, "models/stm/forcefield", "$basetexture") == "stm/forcefield" and P(c, "models/stm/forcefield", "$color").x == 1, "force field untouched")
     check(isBlack(c, "maps/glowstrip"), "self-illuminated wall strip off")
     check(isBlack(c, CORRIGATED), "wall_corrigated (listed) black")
+    check(isBlack(c, "maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8"), "eng_floorlight (listed) black in its cubemap copy")
+    check(isBlack(c, "models/kingpommes/startrek/intrepid/light_white"), "light_white (listed) black though nothing found uses it")
+    check(P(c, "maps/rp_test/maps/hull_500_-2000_64", "$color").x == 1, "cubemap copy on the outside untouched")
+    check(isBlack(c, "maps/rp_test/lights/white_2000_2000_64"), "listed fixture far from any section still goes out")
     check(isBlack(c, BRIDGE_LIGHT), "bridge light off by texture, so STM's brightness proxy can't undo it")
     check(vnear(P(c, "lights/white", "$color"), 0, 0, 0), "lights/white (no texture) black by color")
     check(P(c, ALARM, "$basetexture").textureName == ALARM and P(c, ALARM, "$color2") == nil, "STM alert material untouched")
+    check(crewCl.LightingEditor.BaseMaterialName("maps/rp_test/foo/bar_-1_2_-30") == "foo/bar" and crewCl.LightingEditor.BaseMaterialName("foo/bar_1_2_3") == "foo/bar_1_2_3", "cubemap copy names")
     local black = c.renderTargets.lightingeditor_black
     check(black.cleared[1] == 0 and black.cleared[2] == 0 and black.cleared[3] == 0, "the black texture is black")
 end)
@@ -367,7 +382,7 @@ step("new props are picked up while dark", function()
     table.remove(M.entities)
 end)
 
-step("STM's light sources keep shining, as real light", function()
+step("LCARS screens and force fields keep shining, as real light", function()
     local lcars = crewCl.Star_Trek.LCARS
     local console = Ent("prop_dynamic", "models/props/console.mdl", V(100, 0, 64), {})
     lcars.ActiveInterfaces[5] = { Ent = console, AnimPos = 1, Windows = {
@@ -377,6 +392,7 @@ step("STM's light sources keep shining, as real light", function()
     crewCl.Star_Trek.Alert.CurrentAlert = "red"
     crewCl.materialDefs[ALARM].params["$alarmcolor"] = V(255 / 256, 0, 0)
     RunTo(M.time + 0.5)
+    check(#liveLights(crewCl) == 2, "screen and force field only, no alert lights: " .. #liveLights(crewCl))
 
     local byPos, screen = {}, nil
     for _, l in ipairs(liveLights(crewCl)) do
@@ -390,7 +406,7 @@ step("STM's light sources keep shining, as real light", function()
         check(screen.r == math.floor((202 + 53) / 2 + 0.5) and screen.b == math.floor((50 + 192) / 2 + 0.5), "the average color of what it shows")
         local size = math.sqrt((400 / 20) * (200 / 20))
         check(near(screen.size, math.max(size * Config.Emitters.LCARS.RadiusPerUnit, Config.Emitters.LCARS.MinRadius)), "sized by the screen")
-        check(near(screen.brightness, Config.Emitters.LCARS.Brightness / K), "bright enough to show in the dark")
+        check(near(screen.brightness, Config.Emitters.LCARS.Brightness * Config.Emitters.MaxBoost), "raised in the dark, but only up to MaxBoost")
     end
 
     local fieldLight = byPos["640 128 64"]
@@ -400,9 +416,7 @@ step("STM's light sources keep shining, as real light", function()
             string.format("the color of its texture: %d %d %d", fieldLight.r, fieldLight.g, fieldLight.b))
     end
 
-    local alarm = byPos["300 100 100"]
-    check(alarm ~= nil and alarm.r == 255 and alarm.g == 0 and alarm.b == 0, "the alert fixture glows the alert's red")
-    check(byPos["300 900 300"] == nil, "only fixtures inside the ship")
+    check(byPos["300 100 100"] == nil, "alert fixtures give off no light")
 
     -- Red alert: screens switch to STM's red palette.
     lcars.ActiveInterfaces[5].Windows[1].CurrentStyle = "LCARS_RED"
@@ -411,10 +425,10 @@ step("STM's light sources keep shining, as real light", function()
         if l.dir then check(l.r == 197 and l.g == 52 and l.b == 54, "red alert screens light red") end
     end
 
-    crewCl.Star_Trek.Alert.CurrentAlert = nil -- (the material keeps its color until STM clears it)
+    crewCl.Star_Trek.Alert.CurrentAlert = nil
     lcars.ActiveInterfaces[5] = nil
     RunTo(M.time + 1)
-    check(#liveLights(crewCl) == 1, "alert over and screen closed: only the force field still lights (" .. #liveLights(crewCl) .. ")")
+    check(#liveLights(crewCl) == 1, "screen closed: only the force field still lights (" .. #liveLights(crewCl) .. ")")
     crewCl.materialDefs[ALARM].params["$alarmcolor"] = V(0, 0, 0)
 end)
 

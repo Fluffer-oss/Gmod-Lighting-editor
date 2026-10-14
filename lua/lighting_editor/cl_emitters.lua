@@ -2,11 +2,12 @@ local LE = LightingEditor
 local Config = LE.Config
 
 -- STM's own light sources keep working when the power's out, and give off real
--- light: LCARS screens, force fields and alert lights. Each is a dynamic light
--- (the nearest Config.Emitters.MaxLights of them). While a deck is dark, the
--- surfaces they light are dimmed along with everything else, so their
--- brightness is raised by the same amount: they light the room as brightly as
--- they would with the power on.
+-- light: LCARS screens and force fields. Each is a dynamic light (the nearest
+-- Config.Emitters.MaxLights of them). While a deck is dark, the surfaces they
+-- light are dimmed along with everything else, so their brightness is raised
+-- to make up for some of it, at most Config.Emitters.MaxBoost times. Not all
+-- of it: static props can't receive dynamic light, so lighting the walls much
+-- more than the props around them would leave the props as black cutouts.
 
 local BASE_INDEX = 0x4C450 -- dynamic light slots used here: BASE_INDEX + 0 .. MaxLights - 1
 
@@ -121,28 +122,6 @@ local function ForceFieldEmitters(out)
 end
 
 --------------------------------------------------------------------------------
--- STM alert lights
---------------------------------------------------------------------------------
-
-local function AlertEmitters(out)
-    local alert = Star_Trek and Star_Trek.Alert
-    local settings = Config.Emitters.Alert
-    if not (alert and alert.CurrentAlert and isstring(alert.AlertMaterial) and settings) then return end
-
-    -- STM sets the alert color on the material; the fixtures glow with it.
-    local color = Material(alert.AlertMaterial):GetVector("$alarmcolor")
-    if not color or color:Length() <= 0 then return end
-    color = Saturate(color)
-
-    for _, user in ipairs(LE.MaterialUsers[LE.NormalizePath(alert.AlertMaterial)] or {}) do
-        local pos = user.pos or (IsValid(user.ent) and user.ent:WorldSpaceCenter())
-        if pos then
-            table.insert(out, { pos = pos, color = color, brightness = settings.Brightness, radius = settings.Radius })
-        end
-    end
-end
-
---------------------------------------------------------------------------------
 -- Lighting them
 --------------------------------------------------------------------------------
 
@@ -150,7 +129,6 @@ function LE.CollectEmitters()
     local out = {}
     LCARSEmitters(out)
     ForceFieldEmitters(out)
-    AlertEmitters(out)
     return out
 end
 
@@ -173,8 +151,8 @@ hook.Add("Think", "LightingEditor.Emitters", function()
         table.sort(emitters, function(a, b) return a.distance < b.distance end)
     end
 
-    -- Make up for the darkness on the surfaces they light.
-    local boost = 1 / math.max(1 - (LE.CurrentDarkness or 0), 0.05)
+    -- Make up for some of the darkness on the surfaces they light.
+    local boost = math.min(1 / math.max(1 - (LE.CurrentDarkness or 0), 0.01), settings.MaxBoost)
 
     for i = 1, math.min(#emitters, settings.MaxLights) do
         local emitter = emitters[i]

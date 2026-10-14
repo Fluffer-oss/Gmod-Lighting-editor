@@ -28,10 +28,6 @@ for _, tracked in pairs(LE.Tracked) do
     if tracked then table.insert(trackedList, tracked) end
 end
 
--- Where each material is used: name -> list of { pos = Vector } or { ent = Entity }.
--- Emitters use it to find STM's alert light fixtures.
-LE.MaterialUsers = LE.MaterialUsers or {}
-
 -- Current lighting: k = how much light is left (1 = normal), lightsOff = glow off.
 LE.Lighting = LE.Lighting or { k = 1, lightsOff = false }
 
@@ -54,14 +50,24 @@ local function AlertMaterial()
     return alert and isstring(alert.AlertMaterial) and LE.NormalizePath(alert.AlertMaterial) or nil
 end
 
+-- The map compiler gives every brush material near a cubemap its own copy,
+-- "maps/<map>/<name>_<x>_<y>_<z>", which is what the world actually draws.
+-- This is the name it was copied from.
+function LE.BaseMaterialName(name)
+    local base = name:match("^maps/[^/]+/(.+)$")
+    if not base then return name end
+    return (base:gsub("_%-?%d+_%-?%d+_%-?%d+$", ""))
+end
+
 -- Which kind a material is, or nil to leave it alone.
 function LE.ClassifyMaterial(name, mat)
+    local base = LE.BaseMaterialName(name)
     for _, pattern in ipairs(Config.KeepMaterials or {}) do
-        if name:find(pattern) then return nil end
+        if name:find(pattern) or base:find(pattern) then return nil end
     end
-    -- STM drives the alert light material itself, and it's an emitter here.
-    if name == AlertMaterial() then return nil end
-    if IsListedLight(name) then return GLOW end
+    -- STM drives the alert light material itself.
+    if base == AlertMaterial() then return nil end
+    if IsListedLight(base) then return GLOW end
 
     local shader = string.lower(mat:GetShader() or "")
     if shader:find("water", 1, true) or shader:find("refract", 1, true) or shader:find("sky", 1, true) then
@@ -185,12 +191,6 @@ end
 -- Finding what to darken
 --------------------------------------------------------------------------------
 
-local function AddUser(name, user)
-    name = LE.NormalizePath(name)
-    LE.MaterialUsers[name] = LE.MaterialUsers[name] or {}
-    table.insert(LE.MaterialUsers[name], user)
-end
-
 local function Inside(pos)
     return LE.NearSection(pos, Config.InteriorDistance)
 end
@@ -219,6 +219,9 @@ end
 local function ScanWorld(pause)
     while not LE.GetDecks() do coroutine.yield() end
 
+    -- The listed light fixtures go out wherever they're used, found or not.
+    for _, name in ipairs(Config.LightMaterials or {}) do Track(name) end
+
     local area = {}
     local ok = LE.ScanMap(function(name, center, faceArea)
         local entry = area[name]
@@ -233,14 +236,13 @@ local function ScanWorld(pause)
         if Inside(pos) then
             for _, name in ipairs(ModelMaterials(model)) do
                 Track(name)
-                AddUser(name, { pos = pos })
             end
         end
     end, pause)
 
     if ok then
         for name, entry in pairs(area) do
-            if entry.inside >= entry.total * 0.5 then Track(name) end
+            if entry.inside >= entry.total * 0.5 or IsListedLight(LE.BaseMaterialName(name)) then Track(name) end
             pause()
         end
     else
@@ -264,7 +266,6 @@ local function ScanEntities()
             seenEntities[ent] = model
             for _, name in ipairs(ent:GetMaterials() or {}) do
                 Track(name)
-                AddUser(name, { ent = ent })
             end
             local override = ent:GetMaterial()
             if override and override ~= "" then Track(override) end

@@ -6,7 +6,9 @@ LE.Config = {
     -- Flashlights are unaffected.
     DarkLevel = 0.92,
 
-    -- Light fixtures: these materials go fully black when the power is out.
+    -- Light fixtures: these materials go fully black when the power is out,
+    -- wherever they're used. Copies the map compiler made for cubemaps
+    -- ("maps/<map>/<name>_x_y_z") count as the same material.
     LightMaterials = {
         "models/kingpommes/startrek/intrepid/light_white",
         "models/kingpommes/startrek/intrepid/bridge_pillar_glow",
@@ -48,13 +50,15 @@ LE.Config = {
     Emitters = {
         MaxLights = 12,
         Distance = 2000,
+        -- In the dark their light is raised to show, up to this many times.
+        -- Static props can't receive dynamic light, so much more than this
+        -- leaves them as black cutouts against brightly lit walls.
+        MaxBoost = 2,
         -- LCARS screens: light the color of what they show, from their face,
         -- sized by the screen.
         LCARS = { Brightness = 0.6, RadiusPerUnit = 3, MinRadius = 48, MaxRadius = 220 },
         -- Force fields: light the color of their texture.
-        ForceFields = { Brightness = 1.2, RadiusScale = 1.2, MinRadius = 80, MaxRadius = 300 },
-        -- STM alert lights: the alert's color, from every fixture using the alert material.
-        Alert = { Brightness = 1.5, Radius = 180 }
+        ForceFields = { Brightness = 1.2, RadiusScale = 1.2, MinRadius = 80, MaxRadius = 300 }
     },
 
     -- Transitions.
