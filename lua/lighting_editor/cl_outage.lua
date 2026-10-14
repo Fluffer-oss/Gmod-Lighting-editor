@@ -3,9 +3,9 @@ local Config = LE.Config
 
 -- A section without power is darkened on screen, not in the map's baked
 -- lighting: every frame, the stencil buffer marks the pixels whose surface lies
--- inside that section's boxes (world, props, players alike), and only those
--- pixels are darkened. A few draw calls per section, so turning power off or on
--- never rebuilds lightmaps and never freezes the game.
+-- inside the dark sections' boxes (world, props, players alike), and only those
+-- pixels are darkened. A few draw calls in all, however many sections are dark,
+-- so turning power off or on never rebuilds lightmaps and never freezes the game.
 
 LE.ClientOutages = LE.ClientOutages or {}
 
@@ -91,13 +91,19 @@ function LE.SectionDarkness(entry, now)
 end
 
 --------------------------------------------------------------------------------
--- Marking a section's pixels in the stencil buffer
+-- Marking dark pixels in the stencil buffer
 --------------------------------------------------------------------------------
 
--- Bit layout: bits 0-6 are scratch for the box being tested, bit 7 means
--- "this pixel's surface is inside the section".
-local INSIDE_BIT = 128
-local SCRATCH = 127
+-- Shadow-volume counting: every box face that's behind a pixel's surface counts
+-- +1 if it faces away from the camera and -1 if it faces it. A surface inside a
+-- box has exactly one more such back face than front faces; outside every box,
+-- they cancel. So a nonzero stencil means "inside at least one box", however
+-- many boxes overlap, and wherever the camera is.
+--
+-- Bleed: STM's boxes rarely cover a room exactly, so the darkness also spreads
+-- past them in every direction. The boxes are drawn again in a few layers, each
+-- a bit bigger, and each layer darkens its pixels by an equal share: fully dark
+-- inside the boxes, fading out to nothing Config.BleedDistance past them.
 
 local function FullScreen(color)
     cam.Start2D()
@@ -119,89 +125,68 @@ local function BoxFaces(min, max)
     }
 end
 
-local function DrawFaces(faces)
-    for _, face in ipairs(faces) do
-        local q = face.quad
-        render.DrawQuad(q[1], q[2], q[3], q[4], color_white)
+-- All the given quads in one draw call.
+local function DrawQuads(quads)
+    if #quads == 0 then return end
+    mesh.Begin(MATERIAL_QUADS, #quads)
+    for _, q in ipairs(quads) do
+        for i = 1, 4 do
+            mesh.Position(q[i])
+            mesh.Color(255, 255, 255, 255)
+            mesh.AdvanceVertex()
+        end
     end
+    mesh.End()
 end
 
--- Sets INSIDE_BIT on every pixel whose visible surface is inside the box.
--- Faces facing away from the camera ("back") are behind any surface that's inside
--- the box or in front of it: their depth test fails there. Faces toward the camera
--- ("front") are in front of any surface that's inside or behind the box: their
--- depth test passes there. Inside = both. With the camera inside the box there
--- are no front faces, so the first test alone decides.
-local function MarkBox(min, max, eye)
-    local pad = Config.BoxPadding
-    min = min - Vector(pad, pad, pad)
-    max = max + Vector(pad, pad, pad)
-
+-- Marks every pixel whose surface is inside any of the boxes (grown by `pad`).
+local function MarkBoxes(boxes, pad, eye)
+    local grow = Vector(pad, pad, pad)
     local front, back = {}, {}
-    for _, face in ipairs(BoxFaces(min, max)) do
-        local isFront = face.sign > 0 and eye[face.axis] > face.outside or face.sign < 0 and eye[face.axis] < face.outside
-        table.insert(isFront and front or back, face)
+    for _, box in ipairs(boxes) do
+        for _, face in ipairs(BoxFaces(box.Min - grow, box.Max + grow)) do
+            local isFront = face.sign > 0 and eye[face.axis] > face.outside or face.sign < 0 and eye[face.axis] < face.outside
+            table.insert(isFront and front or back, face.quad)
+        end
     end
 
-    -- Clear the scratch bits.
-    render.SetStencilWriteMask(SCRATCH)
-    render.SetStencilTestMask(0)
+    render.ClearStencil()
+    render.SetStencilWriteMask(255)
+    render.SetStencilTestMask(255)
     render.SetStencilReferenceValue(0)
     render.SetStencilCompareFunction(STENCIL_ALWAYS)
-    render.SetStencilPassOperation(STENCIL_REPLACE)
-    render.SetStencilZFailOperation(STENCIL_REPLACE)
-    FullScreen(color_white)
-
-    -- Back faces whose depth test fails: the surface is in front of the box's far side.
-    render.SetStencilReferenceValue(1)
     render.SetStencilPassOperation(STENCIL_KEEP)
-    render.SetStencilZFailOperation(STENCIL_REPLACE)
-    DrawFaces(back)
-
-    local insideValue = 1
-    if #front > 0 then
-        -- ...and front faces whose depth test passes: it's also behind the near side.
-        render.SetStencilTestMask(SCRATCH)
-        render.SetStencilCompareFunction(STENCIL_EQUAL)
-        render.SetStencilPassOperation(STENCIL_INCR)
-        render.SetStencilZFailOperation(STENCIL_KEEP)
-        DrawFaces(front)
-        insideValue = 2
-    end
-
-    -- Promote "inside this box" to the section's inside bit.
-    render.SetStencilTestMask(SCRATCH)
-    render.SetStencilCompareFunction(STENCIL_EQUAL)
-    render.SetStencilWriteMask(INSIDE_BIT)
-    render.SetStencilReferenceValue(INSIDE_BIT + insideValue)
-    render.SetStencilPassOperation(STENCIL_REPLACE)
-    render.SetStencilZFailOperation(STENCIL_KEEP)
-    FullScreen(color_white)
-end
-
-local function DrawSectionDarkness(section, darkness, eye)
-    render.SetStencilEnable(true)
-    render.ClearStencil()
     render.SetStencilFailOperation(STENCIL_KEEP)
 
+    render.SetStencilZFailOperation(STENCIL_INCR)
+    DrawQuads(back)
+    render.SetStencilZFailOperation(STENCIL_DECR)
+    DrawQuads(front)
+end
+
+-- Darkens the boxes to `darkness`, with the bleed around them.
+local function DrawDarkness(boxes, darkness, eye)
+    local steps = math.max(0, math.floor(Config.BleedSteps))
+    local layers = steps + 1
+    -- Layers stack multiplicatively: `layers` of them make exactly `darkness`.
+    local alpha = 1 - (1 - darkness) ^ (1 / layers)
+
+    render.SetStencilEnable(true)
     render.SetMaterial(VolumeMaterial)
-    render.OverrideColorWriteEnable(true, false)
-    render.OverrideDepthEnable(true, false)
-    for _, area in ipairs(section.Areas or {}) do
-        MarkBox(area.Min, area.Max, eye)
+    for layer = 0, steps do
+        local pad = Config.BoxPadding + (steps > 0 and Config.BleedDistance * layer / steps or 0)
+
+        render.OverrideColorWriteEnable(true, false)
+        render.OverrideDepthEnable(true, false)
+        MarkBoxes(boxes, pad, eye)
+        render.OverrideDepthEnable(false, false)
+        render.OverrideColorWriteEnable(false, false)
+
+        render.SetStencilWriteMask(0)
+        render.SetStencilCompareFunction(STENCIL_NOTEQUAL)
+        render.SetStencilZFailOperation(STENCIL_KEEP)
+        FullScreen(Color(0, 0, 0, 255 * alpha))
     end
-    render.OverrideDepthEnable(false, false)
-    render.OverrideColorWriteEnable(false, false)
-
-    render.SetStencilWriteMask(0)
-    render.SetStencilTestMask(INSIDE_BIT)
-    render.SetStencilReferenceValue(INSIDE_BIT)
-    render.SetStencilCompareFunction(STENCIL_EQUAL)
-    render.SetStencilPassOperation(STENCIL_KEEP)
-    render.SetStencilZFailOperation(STENCIL_KEEP)
-
-    FullScreen(Color(0, 0, 0, 255 * darkness))
-
     render.SetStencilEnable(false)
 end
 
@@ -209,31 +194,59 @@ end
 -- Frame
 --------------------------------------------------------------------------------
 
--- The dark sections worth drawing this frame: nearest first, capped.
-local function ActiveSections(eye, now)
-    local active = {}
-    for _, entry in pairs(LE.ClientOutages) do
-        local section = LE.GetSection(entry.deck, entry.sectionId)
-        if section then
-            local darkness = LE.SectionDarkness(entry, now)
-            local distance = LE.DistanceToSection(section, eye)
-            if darkness > 0.005 and distance < Config.SectionDrawDistance then
-                table.insert(active, { entry = entry, section = section, darkness = darkness, distance = distance })
+-- Whether the box (with its bleed) is entirely behind the camera.
+local function BehindCamera(box, reach, eye, forward)
+    for _, x in ipairs({ box.Min.x - reach, box.Max.x + reach }) do
+        for _, y in ipairs({ box.Min.y - reach, box.Max.y + reach }) do
+            for _, z in ipairs({ box.Min.z - reach, box.Max.z + reach }) do
+                if (x - eye.x) * forward.x + (y - eye.y) * forward.y + (z - eye.z) * forward.z > 0 then
+                    return false
+                end
             end
         end
     end
-    table.sort(active, function(a, b) return a.distance < b.distance end)
-    for i = #active, Config.MaxSectionsDrawn + 1, -1 do
-        active[i] = nil
+    return true
+end
+
+-- The boxes of every dark section in view, grouped by how dark they are right
+-- now (sections flicker separately, then all settle at the same darkness). The
+-- nearest Config.MaxBoxesDrawn boxes are drawn; a whole deck is usually far fewer.
+local function DarkGroups(eye, forward, now)
+    local reach = Config.BoxPadding + Config.BleedDistance
+    local boxes = {}
+    for _, entry in pairs(LE.ClientOutages) do
+        local section = LE.GetSection(entry.deck, entry.sectionId)
+        local darkness = section and LE.SectionDarkness(entry, now) or 0
+        if darkness > 0.005 then
+            for _, box in ipairs(section.Areas or {}) do
+                local distance = LE.DistanceToBox(box, eye)
+                if distance < Config.SectionDrawDistance + reach and not BehindCamera(box, reach, eye, forward) then
+                    table.insert(boxes, { box = box, darkness = darkness, distance = distance })
+                end
+            end
+        end
     end
-    return active
+    table.sort(boxes, function(a, b) return a.distance < b.distance end)
+
+    local groups, byDarkness = {}, {}
+    for i = 1, math.min(#boxes, Config.MaxBoxesDrawn) do
+        local item = boxes[i]
+        local group = byDarkness[item.darkness]
+        if not group then
+            group = { darkness = item.darkness, boxes = {} }
+            byDarkness[item.darkness] = group
+            table.insert(groups, group)
+        end
+        table.insert(group.boxes, item.box)
+    end
+    return groups
 end
 
 hook.Add("PostDrawTranslucentRenderables", "LightingEditor.Outages", function(drawingDepth, drawingSkybox, drawing3DSkybox)
     if drawingDepth or drawingSkybox or drawing3DSkybox then return end
 
     local eye = EyePos()
-    for _, item in ipairs(ActiveSections(eye, CurTime())) do
-        DrawSectionDarkness(item.section, item.darkness, eye)
+    for _, group in ipairs(DarkGroups(eye, EyeAngles():Forward(), CurTime())) do
+        DrawDarkness(group.boxes, group.darkness, eye)
     end
 end)

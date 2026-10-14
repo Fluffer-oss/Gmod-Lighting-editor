@@ -59,13 +59,17 @@ function LE.FindSection(pos)
 end
 
 -- Distance from a point to the nearest of a section's boxes (0 if inside one).
+function LE.DistanceToBox(area, pos)
+    local dx = math.max(area.Min.x - pos.x, 0, pos.x - area.Max.x)
+    local dy = math.max(area.Min.y - pos.y, 0, pos.y - area.Max.y)
+    local dz = math.max(area.Min.z - pos.z, 0, pos.z - area.Max.z)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
 function LE.DistanceToSection(section, pos)
     local best = math.huge
     for _, area in ipairs(section.Areas or {}) do
-        local dx = math.max(area.Min.x - pos.x, 0, pos.x - area.Max.x)
-        local dy = math.max(area.Min.y - pos.y, 0, pos.y - area.Max.y)
-        local dz = math.max(area.Min.z - pos.z, 0, pos.z - area.Max.z)
-        best = math.min(best, math.sqrt(dx * dx + dy * dy + dz * dz))
+        best = math.min(best, LE.DistanceToBox(area, pos))
     end
     return best
 end

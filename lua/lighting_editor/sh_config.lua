@@ -12,10 +12,14 @@ LE.Config = {
     FlickerInTime = 0.9,           -- lights struggle back on
     FadeInTime = 0.6,
 
-    -- Only the nearest few dark sections are drawn, as cheap as that is.
-    MaxSectionsDrawn = 6,
-    SectionDrawDistance = 3000,
+    -- Darkness spreads this far past each section's boxes, fading out, since
+    -- the boxes rarely cover a room exactly. More steps = smoother fade.
+    BleedDistance = 128,
+    BleedSteps = 4,
+
     BoxPadding = 4,                -- grows each section box so its faces sit behind the walls
+    SectionDrawDistance = 8000,    -- dark sections further away than this aren't drawn
+    MaxBoxesDrawn = 128,           -- the nearest this many section boxes are drawn
 
     Sounds = {
         Out = "ambient/energy/spark6.wav",

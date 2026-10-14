@@ -29,33 +29,6 @@ M.Vector = Vector
 local COLOR = {}
 local function Color(r, g, b, a) return setmetatable({ r = r, g = g, b = b, a = a or 255 }, COLOR) end
 
----------------------------------------------------------------- binary file reading (for real .bsp files)
-local function float32(s, i)
-    local b1, b2, b3, b4 = s:byte(i, i + 3)
-    local sign = b4 > 127 and -1 or 1
-    local exponent = (b4 % 128) * 2 + math.floor(b3 / 128)
-    local mantissa = (b3 % 128) * 65536 + b2 * 256 + b1
-    if exponent == 0 then return sign * math.ldexp(mantissa, -149) end
-    return sign * math.ldexp(1 + mantissa / 8388608, exponent - 127)
-end
-local function int32(s, i)
-    local b1, b2, b3, b4 = s:byte(i, i + 3)
-    local v = b1 + b2 * 256 + b3 * 65536 + b4 * 16777216
-    return v >= 2147483648 and v - 4294967296 or v
-end
-
-local function OpenRealFile(path)
-    local f = io.open(path, "rb")
-    if not f then return nil end
-    local handle = {}
-    function handle:Read(n) return f:read(n) end
-    function handle:Seek(pos) f:seek("set", pos) end
-    function handle:ReadLong() return int32(f:read(4), 1) end
-    function handle:ReadFloat() return float32(f:read(4), 1) end
-    function handle:Close() f:close() end
-    return handle
-end
-
 ---------------------------------------------------------------- bit ops (8-bit)
 local function band(a, b)
     local r, bit = 0, 1
@@ -72,7 +45,6 @@ local function bor(a, b) return a + b - band(a, b) end
 M.queueToServer, M.queueToClients, M.pooled = {}, {}, {}
 M.time = 100
 M.errors = {}
-M.maps = {} -- "maps/<name>.bsp" -> real path
 
 function M.MakePlayer(name, admin)
     local p = { __valid = true, name = name, admin = admin, pos = Vector(0, 0, 0), chat = {} }
@@ -156,15 +128,14 @@ function M.NewRealm(isServer, localPlayer)
         env.LocalPlayer = function() return localPlayer end
         env.EyePos = function() return M.eye or localPlayer:EyePos() end
         env.ScrW, env.ScrH = function() return 1920 end, function() return 1080 end
-        env.file = { Open = function(path, mode, where)
-            assert(mode == "rb" and where == "GAME")
-            return M.maps[path] and OpenRealFile(M.maps[path]) or nil
-        end }
         env.sounds = {}
         env.CreateMaterial = function(name) return { name = name } end
         env.Material = function(name) return { name = name } end
-        env.STENCIL_KEEP, env.STENCIL_REPLACE, env.STENCIL_INCR = 1, 3, 7
-        env.STENCIL_EQUAL, env.STENCIL_ALWAYS = 3, 8
+        env.EyeAngles = function() return { Forward = function() return M.forward end } end
+        env.STENCIL_KEEP, env.STENCIL_REPLACE, env.STENCIL_INCR, env.STENCIL_DECR = 1, 3, 7, 8
+        env.STENCIL_EQUAL, env.STENCIL_NOTEQUAL, env.STENCIL_ALWAYS = 3, 6, 8
+        env.MATERIAL_QUADS = 4
+        env.drawCalls = 0
         env.dlights = {}
         env.DynamicLight = function(index) local d = {} env.dlights[index] = d return d end
         env.cam = {}
@@ -178,6 +149,7 @@ function M.NewRealm(isServer, localPlayer)
             local a, b = band(st.ref, st.test), band(px.stencil, st.test)
             if st.cmp == 8 then return true end
             if st.cmp == 3 then return a == b end
+            if st.cmp == 6 then return a ~= b end
             error("compare function not simulated: " .. st.cmp)
         end
         local function apply(px, op)
@@ -185,6 +157,7 @@ function M.NewRealm(isServer, localPlayer)
             local value
             if op == 3 then value = st.ref
             elseif op == 7 then value = (px.stencil + 1) % 256
+            elseif op == 8 then value = (px.stencil - 1) % 256
             else error("stencil op not simulated: " .. op) end
             px.stencil = bor(band(px.stencil, bnot(st.write)), band(value, st.write))
         end
@@ -206,7 +179,7 @@ function M.NewRealm(isServer, localPlayer)
                 local a, b = q[i], q[i % 4 + 1]
                 local s = (b - a):Cross(hit - a):Dot(n)
                 if math.abs(s) > 1e-6 then
-                    if sign and (s > 0) ~= sign then return nil end
+                    if sign ~= nil and (s > 0) ~= sign then return nil end
                     sign = s > 0
                 end
             end
@@ -226,15 +199,29 @@ function M.NewRealm(isServer, localPlayer)
             SetStencilZFailOperation = function(v) st.zfail = v end,
             OverrideColorWriteEnable = function(on, write) st.colorOff = on and not write end,
             OverrideDepthEnable = function(on, write) st.depthWriteOff = on and not write end,
-            DrawQuad = function(a, b, c, d)
-                assert(st.depthWriteOff, "stencil-marking geometry must not write depth")
-                local q = { a, b, c, d }
-                for _, px in ipairs(M.pixels or {}) do
-                    local t = hitQuad(px, q)
-                    if t then touch(px, t <= px.dist) end
-                end
-            end,
+            DrawQuad = function(a, b, c, d) env.mesh.Begin(4, 1) for _, v in ipairs({ a, b, c, d }) do env.mesh.Position(v) env.mesh.AdvanceVertex() end env.mesh.End() end,
             DrawSprite = function(pos, w, h, col) table.insert(env.sprites, { pos = pos, color = col }) end
+        }
+        local building
+        env.mesh = {
+            Begin = function(kind, count) assert(not building and kind == 4 and count > 0) building = { count = count, verts = {} } end,
+            Position = function(v) building.pos = v end,
+            Color = function() end,
+            AdvanceVertex = function() table.insert(building.verts, building.pos) end,
+            End = function()
+                assert(#building.verts == building.count * 4, "mesh.Begin count doesn't match the vertices")
+                assert(st.depthWriteOff, "stencil-marking geometry must not write depth")
+                env.drawCalls = env.drawCalls + 1
+                local v = building.verts
+                building = nil
+                for i = 1, #v, 4 do
+                    local q = { v[i], v[i + 1], v[i + 2], v[i + 3] }
+                    for _, px in ipairs(M.pixels or {}) do
+                        local t = hitQuad(px, q)
+                        if t then touch(px, t <= px.dist) end
+                    end
+                end
+            end
         }
         env.cam.Start2D = function() st.in2D = true end
         env.cam.End2D = function() st.in2D = false end
@@ -246,7 +233,8 @@ function M.NewRealm(isServer, localPlayer)
                 for _, px in ipairs(M.pixels or {}) do
                     if touch(px, true) and not st.colorOff and drawColor.a > 0 then
                         if drawColor.r == 0 and drawColor.g == 0 and drawColor.b == 0 then
-                            px.dark = (px.dark or 0) + drawColor.a / 255
+                            -- Alpha blending black over the image.
+                            px.dark = 1 - (1 - (px.dark or 0)) * (1 - drawColor.a / 255)
                         else
                             px.tint = (px.tint or 0) + drawColor.a / 255
                         end
@@ -276,8 +264,10 @@ function M.Pump(server, clients)
 end
 
 -- Pixels looking from `eye` at each scene point (the first surface along that ray).
-function M.SetView(eye, scenePoints)
+-- The camera looks along `forward` (default: down, so nothing's behind it here).
+function M.SetView(eye, scenePoints, forward)
     M.eye = eye
+    M.forward = forward or Vector(0, 0, -1)
     M.pixels = {}
     for i, p in ipairs(scenePoints) do
         local d = p - eye
