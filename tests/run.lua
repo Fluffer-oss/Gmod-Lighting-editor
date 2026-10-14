@@ -11,37 +11,61 @@ local function step(label, fn)
     local ok, err = pcall(fn)
     if not ok then failed = failed + 1 print("ERROR in '" .. label .. "': " .. tostring(err)) end
 end
+local function near(a, b) return math.abs(a - b) < 1e-6 end
+local function vnear(v, x, y, z) return v and near(v.x, x) and near(v.y, y) and near(v.z, z) end
 
--- Star Trek Modules' section data, as synced to both realms. Deck 1:
---   section "1" (100):  x 0..512
---   section "4A" (401): an L of two boxes, x 512..768 (y 0..256 and y 256..512)
---   section "5" (500):  x 768..1024
+-- Star Trek Modules' section data, as synced to both realms.
+-- Deck 1 (z 0..128): two sections with an uncovered corridor (x 512..768) between them.
+-- Deck 2 (z 256..384): one section over the whole deck.
 local function area(x1, y1, z1, x2, y2, z2) return { Min = V(x1, y1, z1), Max = V(x2, y2, z2) } end
 local function MakeDecks()
     return {
-        [1] = { Bounds = {}, Sections = {
+        [1] = { Sections = {
             [100] = { RealId = "1", Name = "Bridge", Areas = { area(0, 0, 0, 512, 256, 128) } },
-            [401] = { RealId = "4A", Name = "Corridor", Areas = { area(512, 0, 0, 768, 256, 128), area(512, 256, 0, 768, 512, 128) } },
             [500] = { RealId = "5", Name = "Engineering", Areas = { area(768, 0, 0, 1024, 256, 128) } }
+        } },
+        [2] = { Sections = {
+            [100] = { RealId = "1", Name = "Quarters", Areas = { area(0, 0, 256, 1024, 256, 384) } }
         } }
     }
 end
 
+-- The map's materials.
+local LIGHT_WHITE = "models/kingpommes/startrek/intrepid/light_white"
+local CORRIGATED = "kingpommes/startrek/intrepid/wall_corrigated"
+M.materials = {
+    ["maps/floor"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
+    ["maps/wall"] = { shader = "WorldVertexTransition", params = { ["$color"] = V(0.5, 0.8, 1) } },
+    ["maps/water"] = { shader = "Water", params = { ["$color"] = V(1, 1, 1) } },
+    ["maps/door"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
+    ["lights/white"] = { shader = "UnlitGeneric", params = { ["$color"] = V(1, 1, 1) } },
+    [LIGHT_WHITE] = { shader = "VertexLitGeneric", params = { ["$color"] = V(1, 1, 1), ["$color2"] = V(1, 1, 1), ["$selfillumtint"] = V(2, 2, 2) } },
+    ["models/shiny"] = { shader = "VertexLitGeneric", params = { ["$color"] = V(1, 1, 1), ["$color2"] = V(1, 1, 1), ["$envmaptint"] = V(0.5, 0.5, 0.5) } },
+    [CORRIGATED] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } }
+}
+M.worldMaterials = { "maps/floor", "maps/wall", "maps/water", CORRIGATED, "lights/white" }
+M.entities = {
+    { GetModel = function() return "*3" end, GetMaterials = function() return { "maps/door" } end },
+    { GetModel = function() return "models/props/chair.mdl" end, GetMaterials = function() return { "models/shiny" } end }
+}
+
 local admin = M.MakePlayer("admin", true)
 local crew = M.MakePlayer("crewman", false)
 local server, adminCl, crewCl, clients
+
+local function NewClient(ply)
+    local realm = M.NewRealm(false, ply)
+    realm.Star_Trek = { Sections = { Decks = MakeDecks() } }
+    realm.include("autorun/lighting_editor.lua")
+    return realm
+end
 
 local function boot()
     M.pooled, M.queueToServer, M.queueToClients = {}, {}, {}
     server = M.NewRealm(true)
     server.Star_Trek = { Sections = { Decks = MakeDecks() } }
     server.include("autorun/lighting_editor.lua")
-    adminCl = M.NewRealm(false, admin)
-    adminCl.Star_Trek = { Sections = { Decks = MakeDecks() } }
-    adminCl.include("autorun/lighting_editor.lua")
-    crewCl = M.NewRealm(false, crew)
-    crewCl.Star_Trek = { Sections = { Decks = MakeDecks() } }
-    crewCl.include("autorun/lighting_editor.lua")
+    adminCl, crewCl = NewClient(admin), NewClient(crew)
     clients = { [admin] = adminCl, [crew] = crewCl }
     adminCl.hook.Run("InitPostEntity")
     crewCl.hook.Run("InitPostEntity")
@@ -49,271 +73,189 @@ local function boot()
 end
 local function pump() M.Pump(server, clients) end
 
--- Renders one frame for a client from `eye`, looking at `points`; returns darkness per point.
-local function Frame(realm, eye, points, forward)
-    M.SetView(eye, points, forward)
+-- Advances the clock to `t`, running client frames every 0.05s on the way.
+local function RunTo(t)
+    while M.time < t - 1e-9 do
+        M.time = math.min(t, M.time + 0.05)
+        for _, realm in pairs(clients) do realm.hook.Run("Think") end
+    end
+end
+
+local function param(realm, name, p) return realm.materialDefs[name].params[p] end
+local function floor(realm) return param(realm, "maps/floor", "$color").x end
+
+-- Whether models are drawn dark in the main view (and back to normal after).
+local function ModelsDark(realm)
+    realm.hook.Run("PreDrawOpaqueRenderables", false, false, false)
+    local dark = realm.modelLighting.suppressed
     realm.hook.Run("PostDrawTranslucentRenderables", false, false, false)
-    realm.hook.Run("Think")
-    local dark = {}
-    for i, px in ipairs(M.pixels) do dark[i] = px.dark or 0 end
+    assert(not realm.modelLighting.suppressed, "engine lighting left suppressed")
     return dark
 end
 
-local function balanced(realm)
-    local st = realm.stencilState
-    return not st.enabled and not st.colorOff and not st.depthWriteOff and not st.in2D
-end
-
--- Scene points (floors and walls) used as pixels.
-local P = {
-    bridgeFloor = V(100, 128, 0),
-    bridgeCeiling = V(300, 128, 128),
-    bridgeWall = V(256, 0, 64),
-    corridorFloorA = V(700, 128, 0),   -- 188 from the bridge: beyond its bleed
-    corridorFloorB = V(640, 400, 0),
-    engineFloor = V(950, 128, 0),      -- 182 from the corridor: beyond its bleed
-    outsideFloor = V(100, -200, 0)
-}
-local ORDER = { "bridgeFloor", "bridgeCeiling", "bridgeWall", "corridorFloorA", "corridorFloorB", "engineFloor", "outsideFloor" }
-local function points() local t = {} for i, k in ipairs(ORDER) do t[i] = P[k] end return t end
-local function darkMap(dark) local t = {} for i, k in ipairs(ORDER) do t[k] = dark[i] end return t end
-
+local DECK1, DECK2 = V(256, 128, 0), V(256, 128, 300)
 boot()
-local DARK = server.LightingEditor.Config.DarkLevel
+local Config = server.LightingEditor.Config
+local DARK = Config.DarkLevel
 
-step("section ids like Star Trek Modules", function()
+step("finding the deck", function()
     local LE = server.LightingEditor
-    check(LE.ParseSectionId("4A") == 401 and LE.ParseSectionId("4b") == 402 and LE.ParseSectionId("1") == 100 and LE.ParseSectionId(400) == 400, "4A=401, 4b=402, 1=100")
-    check(LE.ParseSectionId("x?") == nil, "garbage rejected")
+    check(LE.FindDeck(V(100, 100, 50)) == 1, "inside a deck 1 section")
+    check(LE.FindDeck(V(600, 100, 50)) == 1, "in a corridor no section covers: still deck 1")
+    check(LE.FindDeck(V(100, 100, 300)) == 2, "deck 2")
+    check(LE.FindDeck(V(100, 100, 5000)) == nil, "far above the ship: no deck")
 end)
 
 step("crew can't cut power", function()
-    server.RunCmd(crew, "lighting_outage", { "1", "1" })
+    server.RunCmd(crew, "lighting_outage", { "1" })
     pump()
     check(crew.chat[#crew.chat]:find("permission") ~= nil, "crewman told no permission")
     check(next(server.LightingEditor.Outages) == nil, "nothing changed")
 end)
 
-step("cut power to the bridge", function()
-    M.time = 100
-    server.RunCmd(admin, "lighting_outage", { "1", "1" })
+step("with power everywhere, materials are never touched", function()
+    crew.pos, admin.pos = DECK1, DECK2
+    RunTo(105)
+    check(crewCl.materialWrites == 0 and adminCl.materialWrites == 0, "no material writes")
+    check(not ModelsDark(crewCl), "models normal")
+end)
+
+step("cut power to deck 1", function()
+    server.RunCmd(admin, "lighting_outage", { "1" })
     pump()
-    check(admin.chat[#admin.chat]:find("Power cut in: deck 1 section 1") ~= nil, "admin told: " .. tostring(admin.chat[#admin.chat]))
-    check(crewCl.LightingEditor.ClientOutages["1:100"] and crewCl.LightingEditor.ClientOutages["1:100"].out, "every client knows")
-end)
+    check(admin.chat[#admin.chat]:find("Power cut on: deck 1") ~= nil, "admin told: " .. tostring(admin.chat[#admin.chat]))
+    check(#crewCl.sounds == 1 and #adminCl.sounds == 0, "sound for the crewman on deck 1 only")
 
-step("steady darkness: only surfaces inside the dark section", function()
-    M.time = 110 -- long after the flicker and fade
-    crew.pos = V(256, 128, 0) -- standing on the bridge
-    local d = darkMap(Frame(crewCl, V(256, 128, 64), points()))
-    check(math.abs(d.bridgeFloor - DARK) < 1e-6, "bridge floor dark (camera inside the section)")
-    check(math.abs(d.bridgeCeiling - DARK) < 1e-6, "bridge ceiling dark")
-    check(math.abs(d.bridgeWall - DARK) < 1e-6, "bridge wall dark")
-    check(d.corridorFloorA == 0 and d.corridorFloorB == 0 and d.engineFloor == 0, "other sections untouched")
-    check(d.outsideFloor == 0, "outside the ship untouched")
-    check(balanced(crewCl), "render state restored")
-    local tinted = false
-    for _, px in ipairs(M.pixels) do if px.tint then tinted = true end end
-    check(not tinted, "darkening only: no colored tint anywhere")
-    check(#crewCl.sprites == 0 and next(crewCl.dlights) == nil, "no glow sprites or extra lights")
-end)
-
-step("looking at the dark bridge from engineering, through the corridor", function()
-    local d = darkMap(Frame(crewCl, V(1000, 128, 64), points()))
-    check(math.abs(d.bridgeFloor - DARK) < 1e-6, "bridge floor dark from far away (camera outside the section)")
-    check(d.corridorFloorA == 0, "corridor floor in between not darkened")
-    check(d.engineFloor == 0, "engineering floor (where we stand) not darkened")
-end)
-
-step("looking at the dark bridge from outside the ship", function()
-    local d = darkMap(Frame(crewCl, V(256, -400, 64), points()))
-    check(math.abs(d.bridgeFloor - DARK) < 1e-6, "bridge seen from outside: dark")
-    check(d.outsideFloor == 0, "ground outside: normal")
-end)
-
-step("a two-box (L-shaped) section goes dark as a whole", function()
-    server.RunCmd(admin, "lighting_outage", { "1", "4A" })
-    pump()
-    M.time = 130
-    local d = darkMap(Frame(crewCl, V(256, 128, 64), points()))
-    check(math.abs(d.corridorFloorA - DARK) < 1e-6 and math.abs(d.corridorFloorB - DARK) < 1e-6, "both boxes of section 4A dark")
-    check(d.engineFloor == 0, "engineering still lit")
-    check(math.abs(d.bridgeFloor - DARK) < 1e-6, "bridge still dark too")
-end)
-
-step("flicker, then fade, then steady", function()
-    local LE = crewCl.LightingEditor
-    local entry = { deck = 1, sectionId = 500, out = true, changedAt = 200 }
     local seen = {}
-    for t = 0, LE.Config.FlickerOutTime - 0.01, 0.05 do
-        seen[LE.SectionDarkness(entry, 200 + t)] = true
+    local stop = M.time + Config.FlickerOutTime - 0.05
+    while M.time < stop do
+        RunTo(M.time + 0.05)
+        seen[floor(crewCl) < 0.5 and "dark" or "lit"] = true
     end
-    check(seen[0] and seen[DARK], "flicker alternates between lit and dark")
-    local afterFlicker = LE.SectionDarkness(entry, 200 + LE.Config.FlickerOutTime + 0.01)
-    check(afterFlicker > 0 and afterFlicker < DARK, "then fades down")
-    check(math.abs(LE.SectionDarkness(entry, 260) - DARK) < 1e-9, "then holds at full darkness")
-    local restored = { deck = 1, sectionId = 500, out = false, changedAt = 300 }
-    check(LE.SectionDarkness(restored, 300 + LE.Config.FlickerInTime + LE.Config.FadeInTime + 0.1) == 0, "restored section ends fully lit")
+    check(seen.dark and seen.lit, "lights flicker before dying")
 end)
 
-step("restore power", function()
-    M.time = 400
-    server.RunCmd(admin, "lighting_restore", { "1", "1" })
-    pump()
-    check(admin.chat[#admin.chat]:find("restored") ~= nil, "admin told power restored")
-    M.time = 410
-    local d = darkMap(Frame(crewCl, V(256, 128, 64), points()))
-    check(d.bridgeFloor == 0, "bridge lit again")
-    check(math.abs(d.corridorFloorA - DARK) < 1e-6, "corridor still dark")
+step("deck 1 without power: the crewman's world goes dark", function()
+    RunTo(M.time + 10)
+    check(near(floor(crewCl), 1 - DARK), "floor's baked light down to " .. (1 - DARK) .. ": " .. floor(crewCl))
+    check(vnear(param(crewCl, "maps/wall", "$color"), 0.5 * (1 - DARK), 0.8 * (1 - DARK), 1 - DARK), "displacement wall scaled from its own color")
+    check(near(param(crewCl, "maps/door", "$color").x, 1 - DARK), "brush entities (doors) too")
+    check(vnear(param(crewCl, "maps/water", "$color"), 1, 1, 1), "water (not lightmapped) untouched")
+
+    check(vnear(param(crewCl, "lights/white", "$color"), 0, 0, 0), "lights/white black")
+    check(vnear(param(crewCl, LIGHT_WHITE, "$color2"), 0, 0, 0) and vnear(param(crewCl, LIGHT_WHITE, "$selfillumtint"), 0, 0, 0), "light_white black, glow off")
+    check(vnear(param(crewCl, "models/shiny", "$envmaptint"), 0, 0, 0), "models/shiny reflections off")
+    check(vnear(param(crewCl, CORRIGATED, "$color"), 0, 0, 0), "wall_corrigated black (listed light material, even though it's on the world)")
+    check(param(crewCl, LIGHT_WHITE, "$envmaptint") == nil, "parameters a material doesn't have are left unset")
+
+    check(ModelsDark(crewCl), "models drawn dark")
+    check(near(crewCl.modelLighting.ambient[1], Config.ModelLight) and #crewCl.modelLighting.locals == 0, "with only the configured light")
+    crewCl.hook.Run("PreDrawOpaqueRenderables", false, true, false)
+    check(not crewCl.modelLighting.suppressed, "the skybox isn't touched")
+    crewCl.hook.Run("PostDrawTranslucentRenderables", false, true, false)
 end)
 
-step("sounds play for people nearby, not for late joiners", function()
-    crewCl.sounds = {}
-    M.time = 500
-    crew.pos = V(256, 128, 0)
-    server.RunCmd(admin, "lighting_outage", { "here" }) -- admin is at the origin: not in a section
-    pump()
-    check(admin.chat[#admin.chat]:find("not inside any section") ~= nil, "'here' outside any section explained")
-    admin.pos = V(300, 100, 0)
-    server.RunCmd(admin, "lighting_outage", { "here" })
-    pump()
-    check(#crewCl.sounds == 1, "crewman on the bridge hears it")
+step("the admin on deck 2 (with power) sees nothing change", function()
+    check(adminCl.materialWrites == 0, "no material writes on the admin's game")
+    check(not ModelsDark(adminCl), "models normal")
+end)
 
-    -- A new player joining later sees the state but hears nothing.
-    M.time = 600
+step("steady darkness costs nothing per frame", function()
+    local writes = crewCl.materialWrites
+    RunTo(M.time + 2)
+    check(crewCl.materialWrites == writes, "no material writes while nothing changes")
+end)
+
+step("walking into a corridor the sections don't cover: still dark", function()
+    crew.pos = V(640, 128, 0)
+    RunTo(M.time + 2)
+    check(near(floor(crewCl), 1 - DARK), "still dark")
+end)
+
+step("taking the turbolift to deck 2: fades back to normal", function()
+    crew.pos = V(1300, 128, 200) -- in a turbolift shaft outside every deck: stays on deck 1
+    RunTo(M.time + 1)
+    check(near(floor(crewCl), 1 - DARK), "between decks: still dark")
+    crew.pos = DECK2
+    RunTo(M.time + 0.2 + Config.DeckChangeTime / 2)
+    local mid = floor(crewCl)
+    check(mid > 1 - DARK + 0.05 and mid < 0.95, "fading, not snapping: " .. mid)
+    RunTo(M.time + Config.DeckChangeTime)
+    check(near(floor(crewCl), 1), "floor fully lit")
+    check(vnear(param(crewCl, "maps/wall", "$color"), 0.5, 0.8, 1), "wall back to its exact original color")
+    check(vnear(param(crewCl, LIGHT_WHITE, "$selfillumtint"), 2, 2, 2), "lights back on")
+    check(not ModelsDark(crewCl), "models normal")
+    local writes = crewCl.materialWrites
+    RunTo(M.time + 2)
+    check(crewCl.materialWrites == writes, "then left alone")
+end)
+
+step("back down to deck 1: dark again", function()
+    crew.pos = DECK1
+    RunTo(M.time + 1)
+    check(near(floor(crewCl), 1 - DARK), "dark")
+end)
+
+step("late joiners see the dark deck, with no sound", function()
     local late = M.MakePlayer("late", false)
-    local lateCl = M.NewRealm(false, late)
-    lateCl.Star_Trek = { Sections = { Decks = MakeDecks() } }
-    lateCl.include("autorun/lighting_editor.lua")
+    late.pos = DECK1
+    local lateCl = NewClient(late)
     clients[late] = lateCl
     lateCl.hook.Run("InitPostEntity")
     pump()
-    check(lateCl.LightingEditor.ClientOutages["1:100"] and lateCl.LightingEditor.ClientOutages["1:100"].out, "late joiner gets the outage")
-    check(#lateCl.sounds == 0, "late joiner hears no sound")
+    RunTo(M.time + 1)
+    check(near(floor(lateCl), 1 - DARK), "dark for the joiner")
+    check(#lateCl.sounds == 0, "no sound")
     clients[late] = nil
 end)
 
-step("whole ship and whole deck", function()
-    server.RunCmd(admin, "lighting_restore", { "ship" })
+step("restore power: lights struggle back on, then everything's exactly as it was", function()
+    crewCl.sounds = {}
+    server.RunCmd(admin, "lighting_restore", { "1" })
     pump()
-    check(admin.chat[#admin.chat]:find("3 sections") ~= nil, "ship restore covers all sections")
-    local sends = #M.queueToClients
-    server.RunCmd(admin, "lighting_outage", { "1" })
-    check(#M.queueToClients - sends == 1, "one network update for a whole deck, not one per section")
-    pump()
-    for _, id in ipairs({ 100, 401, 500 }) do
-        check(server.LightingEditor.Outages["1:" .. id].out, "deck 1 section " .. id .. " dark")
-    end
-    server.RunCmd(admin, "lighting_outage", { "1", "9Z" })
-    check(admin.chat[#admin.chat]:find("no section 9Z") ~= nil, "unknown section explained")
-    server.RunCmd(admin, "lighting_outage", { "7" })
-    check(admin.chat[#admin.chat]:find("no deck 7") ~= nil, "unknown deck explained")
-end)
-
-step("a whole deck goes dark, however many sections it has", function()
-    local LE = crewCl.LightingEditor
-    local decks = crewCl.Star_Trek.Sections.Decks
-    -- A 6x6 grid of rooms around the viewer, all dark.
-    local floors = {}
-    for i = 0, 5 do
-        for j = 0, 5 do
-            local id = 2000 + i * 10 + j
-            local x, y = 3000 + i * 300, j * 300
-            decks[1].Sections[id] = { RealId = tostring(id), Name = "room", Areas = { area(x, y, 0, x + 300, y + 300, 128) } }
-            LE.ClientOutages["1:" .. id] = { deck = 1, sectionId = id, out = true, changedAt = 0 }
-            table.insert(floors, V(x + 150, y + 150, 0))
+    check(admin.chat[#admin.chat]:find("restored to: deck 1") ~= nil, "admin told")
+    check(#crewCl.sounds == 1, "crewman hears it")
+    RunTo(M.time + Config.FlickerInTime / 2)
+    check(floor(crewCl) < 1, "not instantly back")
+    RunTo(M.time + Config.FlickerInTime + Config.FadeInTime + 0.5)
+    for name, def in pairs(M.materials) do
+        for p, original in pairs(def.params) do
+            check(vnear(param(crewCl, name, p), original.x, original.y, original.z), name .. " " .. p .. " restored exactly")
         end
     end
-    M.time = 700
-    crewCl.drawCalls = 0
-    -- (Off the grid lines, or test rays run exactly along box edges, which a real GPU never double-counts but this mock would.)
-    local d = Frame(crewCl, V(3911, 874, 61), floors)
-    local all = true
-    for i = 1, #floors do if math.abs(d[i] - DARK) > 1e-6 then all = false end end
-    check(all, "all 36 rooms dark")
-    local layers = LE.Config.BleedSteps + 1
-    check(crewCl.drawCalls <= 2 * layers, "a few draw calls for the whole deck (" .. crewCl.drawCalls .. "), not some per section")
-    check(balanced(crewCl), "render state restored")
-
-    -- Past the box cap, the furthest boxes are the ones left out.
-    local cap = LE.Config.MaxBoxesDrawn
-    LE.Config.MaxBoxesDrawn = 9
-    d = Frame(crewCl, V(3161, 124, 61), floors)
-    LE.Config.MaxBoxesDrawn = cap
-    local drawn = 0
-    for i = 1, #floors do if d[i] > 0 then drawn = drawn + 1 end end
-    check(math.abs(d[1] - DARK) < 1e-6 and d[#floors] == 0, "nearest room drawn, furthest not")
-    check(drawn <= 9 + 8, "about the cap's worth of rooms darkened (" .. drawn .. ", counting bleed)")
-
-    for id in pairs(decks[1].Sections) do if id >= 2000 then decks[1].Sections[id] = nil LE.ClientOutages["1:" .. id] = nil end end
+    check(not ModelsDark(crewCl), "models normal")
 end)
 
-step("darkness bleeds past the section's boxes, fading out", function()
-    crewCl.LightingEditor.ClientOutages = {}
+step("brush entities created since the last outage are included", function()
+    crewCl.materialDefs["maps/hatch"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } }
+    table.insert(M.entities, { GetModel = function() return "*9" end, GetMaterials = function() return { "maps/hatch" } end })
+    server.RunCmd(admin, "lighting_outage", { "1" })
+    pump()
+    RunTo(M.time + 5)
+    check(near(param(crewCl, "maps/hatch", "$color").x, 1 - DARK), "new hatch dark")
+    server.RunCmd(admin, "lighting_restore", { "1" })
+    pump()
+    RunTo(M.time + 5)
+    check(near(param(crewCl, "maps/hatch", "$color").x, 1), "and restored")
+    table.remove(M.entities)
+end)
+
+step("here, ship, and bad decks", function()
+    admin.pos = DECK2
+    server.RunCmd(admin, "lighting_outage", { "here" })
+    check(admin.chat[#admin.chat]:find("deck 2") ~= nil, "'here' is the admin's deck: " .. admin.chat[#admin.chat])
+    admin.pos = V(0, 0, 5000)
+    server.RunCmd(admin, "lighting_outage", { "here" })
+    check(admin.chat[#admin.chat]:find("not on any deck") ~= nil, "'here' off the ship explained")
+    server.RunCmd(admin, "lighting_outage", { "ship" })
+    check(admin.chat[#admin.chat]:find("2 decks") ~= nil, "ship covers both decks")
+    local sends = #M.queueToClients
     server.RunCmd(admin, "lighting_restore", { "ship" })
-    server.RunCmd(admin, "lighting_outage", { "1", "1" })
+    check(#M.queueToClients - sends == 1, "one network update for the whole ship")
     pump()
-    M.time = 800
-    local Config = crewCl.LightingEditor.Config
-    local reach = Config.BoxPadding + Config.BleedDistance
-    -- The bridge box is y 0..256; walk outward from its y = 0 side, in every direction.
-    local offsets = { 2, 20, 50, 80, 110, reach - 2, reach + 10, 300 }
-    local function walk(dir, base)
-        local pts = {}
-        for i, o in ipairs(offsets) do pts[i] = base + dir * o end
-        return Frame(crewCl, V(256, 128, 64), pts)
-    end
-    for _, case in ipairs({
-        { "-y", V(0, -1, 0), V(256, 0, 0) },
-        { "-x", V(-1, 0, 0), V(0, 128, 0) },
-        { "+z", V(0, 0, 1), V(256, 128, 128) },
-        { "-z", V(0, 0, -1), V(256, 128, 0) }
-    }) do
-        local d = walk(case[2], case[3])
-        check(d[1] > DARK * 0.9, case[1] .. ": just outside the box nearly fully dark (" .. d[1] .. ")")
-        local falling = true
-        for i = 2, 6 do if not (d[i] <= d[i - 1] and d[i] > 0) then falling = false end end
-        check(falling, case[1] .. ": fades out with distance")
-        check(d[7] == 0 and d[8] == 0, case[1] .. ": nothing past the bleed distance")
-    end
-end)
-
-step("bleed into a neighbouring lit section; overlaps don't stack", function()
-    M.time = 900
-    -- Bridge (x < 512) dark, corridor (x 512..768) lit.
-    local d = Frame(crewCl, V(256, 128, 64), { V(530, 128, 0), V(700, 128, 0) })
-    check(d[1] > 0 and d[1] < DARK, "corridor floor near the dark bridge is dimmed")
-    check(d[2] == 0, "corridor floor further in is lit")
-    -- Both dark: the shared wall and the area around it are no darker than inside.
-    server.RunCmd(admin, "lighting_outage", { "1", "4A" })
-    pump()
-    M.time = 1000
-    local pts = { V(512, 128, 0), V(500, 128, 0), V(530, 128, 0), V(512, 128, 64), V(640, 400, 0) }
-    d = Frame(crewCl, V(256, 128, 64), pts)
-    local same = true
-    for i = 1, #pts do if math.abs(d[i] - DARK) > 1e-6 then same = false end end
-    check(same, "where two dark sections meet: exactly as dark as inside either")
-end)
-
-step("dark sections behind the camera aren't drawn", function()
-    crewCl.drawCalls = 0
-    Frame(crewCl, V(256, 1000, 64), { V(256, 1100, 0) }, V(0, 1, 0)) -- looking away from the ship
-    check(crewCl.drawCalls == 0, "nothing drawn (" .. crewCl.drawCalls .. " draw calls)")
-    crewCl.drawCalls = 0
-    local d = Frame(crewCl, V(256, 1000, 64), { V(256, 128, 0) }, V(0, -1, 0)) -- looking at it
-    check(crewCl.drawCalls > 0 and math.abs(d[1] - DARK) < 1e-6, "drawn when looking at it")
-end)
-
-step("sections at different darkness don't darken each other", function()
-    local LE = crewCl.LightingEditor
-    -- Bridge (and 4A) fully dark; engineering half way through its fade-in.
-    LE.ClientOutages["1:500"] = { deck = 1, sectionId = 500, out = false, changedAt = M.time - LE.Config.FlickerInTime - LE.Config.FadeInTime / 2 }
-    local engine = LE.SectionDarkness(LE.ClientOutages["1:500"], M.time)
-    check(engine > 0 and engine < DARK, "engineering partly dark")
-    local d = Frame(crewCl, V(256, 128, 64), { V(100, 128, 0), V(990, 128, 0) })
-    check(math.abs(d[1] - DARK) < 1e-6, "bridge exactly as dark as before")
-    check(math.abs(d[2] - engine) < 1e-6, "engineering exactly its own darkness")
-    LE.ClientOutages["1:500"] = nil
+    check(server.LightingEditor.IsDeckPowered(1) and server.LightingEditor.IsDeckPowered(2), "all powered")
+    server.RunCmd(admin, "lighting_outage", { "7" })
+    check(admin.chat[#admin.chat]:find("no deck 7") ~= nil, "unknown deck explained")
 end)
 
 step("Helix chat commands", function()
@@ -322,8 +264,8 @@ step("Helix chat commands", function()
     server.hook.Run("InitializedPlugins")
     check(registered.PowerOutage and registered.PowerRestore, "PowerOutage and PowerRestore registered")
     check(registered.PowerOutage.adminOnly, "admin only")
-    local reply = registered.PowerRestore.OnRun(nil, admin, "1", "4A")
-    check(reply and reply:find("restored") ~= nil, "PowerRestore works: " .. tostring(reply))
+    local reply = registered.PowerOutage.OnRun(nil, admin, "2")
+    check(reply and reply:find("cut on: deck 2") ~= nil, "PowerOutage works: " .. tostring(reply))
 end)
 
 for _, e in ipairs(M.errors) do print("logged: " .. e) end

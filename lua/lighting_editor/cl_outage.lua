@@ -1,19 +1,19 @@
 local LE = LightingEditor
 local Config = LE.Config
 
--- A section without power is darkened on screen, not in the map's baked
--- lighting: every frame, the stencil buffer marks the pixels whose surface lies
--- inside the dark sections' boxes (world, props, players alike), and only those
--- pixels are darkened. A few draw calls in all, however many sections are dark,
--- so turning power off or on never rebuilds lightmaps and never freezes the game.
+-- A deck without power goes dark for the players on it, by turning down the
+-- map's real baked light rather than dimming the screen:
+--  * World brushes: their material's $color scales only the light that comes
+--    from the lightmap (LightmappedGeneric multiplies it into the lightmap
+--    lighting), so walls and floors lose their baked light while flashlights
+--    still work. Nothing is rebuilt: lightmaps are never redownloaded, so it
+--    never freezes, and it can fade smoothly frame by frame.
+--  * Light fixtures (Config.LightMaterials) go fully black.
+--  * Models (players, props) get almost no light (Config.ModelLight).
+-- It applies to everything a player on a dark deck sees, so it doesn't matter
+-- whether STM's sections cover every corridor; it ends when they leave the deck.
 
 LE.ClientOutages = LE.ClientOutages or {}
-
-local VolumeMaterial = CreateMaterial("lightingeditor_volume", "UnlitGeneric", {
-    ["$basetexture"] = "vgui/white",
-    ["$vertexcolor"] = 1,
-    ["$nocull"] = 1
-})
 
 --------------------------------------------------------------------------------
 -- State
@@ -24,33 +24,22 @@ local function RequestState()
     net.SendToServer()
 end
 
-local function PlaySoundIfNear(deck, sectionId, soundPath)
-    local section = LE.GetSection(deck, sectionId)
-    local ply = LocalPlayer()
-    if section and IsValid(ply) and soundPath and soundPath ~= ""
-        and LE.DistanceToSection(section, ply:EyePos()) < Config.SoundDistance then
-        surface.PlaySound(soundPath)
-    end
-end
+LE.CurrentDeck = LE.CurrentDeck or nil
 
 net.Receive(LE.NetState, function()
     local incoming = {}
-    for _ = 1, net.ReadUInt(12) do
-        local entry = {
-            deck = net.ReadUInt(8),
-            sectionId = net.ReadUInt(16),
-            out = net.ReadBool(),
-            changedAt = net.ReadFloat()
-        }
-        incoming[LE.SectionKey(entry.deck, entry.sectionId)] = entry
+    for _ = 1, net.ReadUInt(8) do
+        local entry = { deck = net.ReadUInt(8), out = net.ReadBool(), changedAt = net.ReadFloat() }
+        incoming[entry.deck] = entry
     end
 
-    for key, entry in pairs(incoming) do
-        local previous = LE.ClientOutages[key]
+    for deck, entry in pairs(incoming) do
+        local previous = LE.ClientOutages[deck]
         local isNewChange = not previous or previous.out ~= entry.out
-        -- Only play the sound for changes happening now, not for a joiner's catch-up.
-        if isNewChange and CurTime() - entry.changedAt < 1 then
-            PlaySoundIfNear(entry.deck, entry.sectionId, entry.out and Config.Sounds.Out or Config.Sounds.Restore)
+        -- Only for changes happening now (not a joiner's catch-up), on our deck.
+        local sound = entry.out and Config.Sounds.Out or Config.Sounds.Restore
+        if isNewChange and CurTime() - entry.changedAt < 1 and deck == LE.CurrentDeck and sound and sound ~= "" then
+            surface.PlaySound(sound)
         end
     end
 
@@ -61,7 +50,7 @@ hook.Add("InitPostEntity", "LightingEditor.RequestState", RequestState)
 if IsValid(LocalPlayer()) then RequestState() end
 
 --------------------------------------------------------------------------------
--- How dark a section is right now (0 = normal, Config.DarkLevel = no power)
+-- How dark a deck is right now (0 = normal, Config.DarkLevel = no power)
 --------------------------------------------------------------------------------
 
 -- A fixed stutter pattern, like a light style ("m" = on, "a" = off).
@@ -72,9 +61,9 @@ local function Flicker(t, seed)
     return FLICKER:sub(index, index) == "a"
 end
 
-function LE.SectionDarkness(entry, now)
+function LE.DeckDarkness(entry, now)
     local t = now - entry.changedAt
-    local seed = entry.sectionId % 7
+    local seed = entry.deck % 7
     local dark = Config.DarkLevel
 
     if entry.out then
@@ -91,162 +80,155 @@ function LE.SectionDarkness(entry, now)
 end
 
 --------------------------------------------------------------------------------
--- Marking dark pixels in the stencil buffer
+-- Materials
 --------------------------------------------------------------------------------
 
--- Shadow-volume counting: every box face that's behind a pixel's surface counts
--- +1 if it faces away from the camera and -1 if it faces it. A surface inside a
--- box has exactly one more such back face than front faces; outside every box,
--- they cancel. So a nonzero stencil means "inside at least one box", however
--- many boxes overlap, and wherever the camera is.
---
--- Bleed: STM's boxes rarely cover a room exactly, so the darkness also spreads
--- past them in every direction. The boxes are drawn again in a few layers, each
--- a bit bigger, and each layer darkens its pixels by an equal share: fully dark
--- inside the boxes, fading out to nothing Config.BleedDistance past them.
+-- Original values of every parameter we change, so restoring is exact.
+-- material name -> { mat = IMaterial, params = { [param] = Vector } }
+LE.Originals = LE.Originals or {}
 
-local function FullScreen(color)
-    cam.Start2D()
-    surface.SetDrawColor(color.r, color.g, color.b, color.a)
-    surface.DrawRect(0, 0, ScrW(), ScrH())
-    cam.End2D()
-end
+local function Track(name, params)
+    local tracked = LE.Originals[name]
+    if tracked then return tracked end
 
--- The six faces of an axis-aligned box, each with which side of it is "outside".
-local function BoxFaces(min, max)
-    local x1, y1, z1, x2, y2, z2 = min.x, min.y, min.z, max.x, max.y, max.z
-    return {
-        { axis = "x", outside = x2, sign = 1,  quad = { Vector(x2, y1, z1), Vector(x2, y2, z1), Vector(x2, y2, z2), Vector(x2, y1, z2) } },
-        { axis = "x", outside = x1, sign = -1, quad = { Vector(x1, y1, z1), Vector(x1, y1, z2), Vector(x1, y2, z2), Vector(x1, y2, z1) } },
-        { axis = "y", outside = y2, sign = 1,  quad = { Vector(x1, y2, z1), Vector(x1, y2, z2), Vector(x2, y2, z2), Vector(x2, y2, z1) } },
-        { axis = "y", outside = y1, sign = -1, quad = { Vector(x1, y1, z1), Vector(x2, y1, z1), Vector(x2, y1, z2), Vector(x1, y1, z2) } },
-        { axis = "z", outside = z2, sign = 1,  quad = { Vector(x1, y1, z2), Vector(x2, y1, z2), Vector(x2, y2, z2), Vector(x1, y2, z2) } },
-        { axis = "z", outside = z1, sign = -1, quad = { Vector(x1, y1, z1), Vector(x1, y2, z1), Vector(x2, y2, z1), Vector(x2, y1, z1) } }
-    }
-end
-
--- All the given quads in one draw call.
-local function DrawQuads(quads)
-    if #quads == 0 then return end
-    mesh.Begin(MATERIAL_QUADS, #quads)
-    for _, q in ipairs(quads) do
-        for i = 1, 4 do
-            mesh.Position(q[i])
-            mesh.Color(255, 255, 255, 255)
-            mesh.AdvanceVertex()
+    local mat = Material(name)
+    if not mat or mat:IsError() then return nil end
+    tracked = { mat = mat, params = {} }
+    for param, required in pairs(params) do
+        local value = mat:GetVector(param)
+        if value then
+            tracked.params[param] = Vector(value)
+        elseif required then
+            tracked.params[param] = Vector(1, 1, 1)
         end
     end
-    mesh.End()
+    LE.Originals[name] = tracked
+    return tracked
 end
 
--- Marks every pixel whose surface is inside any of the boxes (grown by `pad`).
-local function MarkBoxes(boxes, pad, eye)
-    local grow = Vector(pad, pad, pad)
-    local front, back = {}, {}
-    for _, box in ipairs(boxes) do
-        for _, face in ipairs(BoxFaces(box.Min - grow, box.Max + grow)) do
-            local isFront = face.sign > 0 and eye[face.axis] > face.outside or face.sign < 0 and eye[face.axis] < face.outside
-            table.insert(isFront and front or back, face.quad)
+local function Scale(tracked, factor)
+    for param, original in pairs(tracked.params) do
+        tracked.mat:SetVector(param, original * factor)
+    end
+end
+
+-- Lightmapped world materials (the world and brush entities like doors),
+-- found when a deck first goes dark for us.
+local worldMaterials, lightMaterials
+
+local function IsLightmapped(mat)
+    local shader = string.lower(mat:GetShader() or "")
+    return shader:find("lightmapped", 1, true) or shader:find("worldvertextransition", 1, true)
+end
+
+local function CollectMaterials()
+    lightMaterials = {}
+    local isLight = {}
+    for _, name in ipairs(Config.LightMaterials) do
+        isLight[string.lower(name)] = true
+        local tracked = Track(name, { ["$color"] = true, ["$color2"] = true, ["$selfillumtint"] = false, ["$envmaptint"] = false })
+        if tracked then table.insert(lightMaterials, tracked) end
+    end
+
+    worldMaterials = {}
+    local seen = {}
+    local function Add(names)
+        for _, name in ipairs(names or {}) do
+            local key = string.lower(name)
+            if not seen[key] and not isLight[key] then
+                seen[key] = true
+                local mat = Material(name)
+                if mat and not mat:IsError() and IsLightmapped(mat) then
+                    table.insert(worldMaterials, Track(name, { ["$color"] = true }))
+                end
+            end
         end
     end
-
-    render.ClearStencil()
-    render.SetStencilWriteMask(255)
-    render.SetStencilTestMask(255)
-    render.SetStencilReferenceValue(0)
-    render.SetStencilCompareFunction(STENCIL_ALWAYS)
-    render.SetStencilPassOperation(STENCIL_KEEP)
-    render.SetStencilFailOperation(STENCIL_KEEP)
-
-    render.SetStencilZFailOperation(STENCIL_INCR)
-    DrawQuads(back)
-    render.SetStencilZFailOperation(STENCIL_DECR)
-    DrawQuads(front)
+    Add(game.GetWorld():GetMaterials())
+    for _, ent in ipairs(ents.GetAll()) do
+        local model = ent:GetModel()
+        if model and model:sub(1, 1) == "*" then Add(ent:GetMaterials()) end
+    end
 end
 
--- Darkens the boxes to `darkness`, with the bleed around them.
-local function DrawDarkness(boxes, darkness, eye)
-    local steps = math.max(0, math.floor(Config.BleedSteps))
-    local layers = steps + 1
-    -- Layers stack multiplicatively: `layers` of them make exactly `darkness`.
-    local alpha = 1 - (1 - darkness) ^ (1 / layers)
+local applied = 0
 
-    render.SetStencilEnable(true)
-    render.SetMaterial(VolumeMaterial)
-    for layer = 0, steps do
-        local pad = Config.BoxPadding + (steps > 0 and Config.BleedDistance * layer / steps or 0)
+-- darkness: 0 (normal) to Config.DarkLevel (no power).
+local function Apply(darkness)
+    -- Skip changes too small to see; the end points are always exact.
+    if darkness == applied then return end
+    if math.abs(darkness - applied) < 1 / 256 and darkness ~= 0 and darkness ~= Config.DarkLevel then return end
+    if not worldMaterials then CollectMaterials() end
 
-        render.OverrideColorWriteEnable(true, false)
-        render.OverrideDepthEnable(true, false)
-        MarkBoxes(boxes, pad, eye)
-        render.OverrideDepthEnable(false, false)
-        render.OverrideColorWriteEnable(false, false)
+    local out = Config.DarkLevel > 0 and math.min(1, darkness / Config.DarkLevel) or 0
+    for _, tracked in ipairs(worldMaterials) do Scale(tracked, 1 - darkness) end
+    for _, tracked in ipairs(lightMaterials) do Scale(tracked, 1 - out) end
+    applied = darkness
 
-        render.SetStencilWriteMask(0)
-        render.SetStencilCompareFunction(STENCIL_NOTEQUAL)
-        render.SetStencilZFailOperation(STENCIL_KEEP)
-        FullScreen(Color(0, 0, 0, 255 * alpha))
+    if darkness == 0 then
+        -- Fully back to normal: pick up any new brush entities next time.
+        worldMaterials, lightMaterials = nil, nil
     end
-    render.SetStencilEnable(false)
 end
 
 --------------------------------------------------------------------------------
 -- Frame
 --------------------------------------------------------------------------------
 
--- Whether the box (with its bleed) is entirely behind the camera.
-local function BehindCamera(box, reach, eye, forward)
-    for _, x in ipairs({ box.Min.x - reach, box.Max.x + reach }) do
-        for _, y in ipairs({ box.Min.y - reach, box.Max.y + reach }) do
-            for _, z in ipairs({ box.Min.z - reach, box.Max.z + reach }) do
-                if (x - eye.x) * forward.x + (y - eye.y) * forward.y + (z - eye.z) * forward.z > 0 then
-                    return false
-                end
-            end
-        end
-    end
-    return true
+local nextDeckCheck, deckChangedAt, levelAtDeckChange = 0, -math.huge, 0
+local current = 0
+
+local function TargetDarkness(now)
+    local entry = LE.CurrentDeck and LE.ClientOutages[LE.CurrentDeck]
+    return entry and LE.DeckDarkness(entry, now) or 0
 end
 
--- The boxes of every dark section in view, grouped by how dark they are right
--- now (sections flicker separately, then all settle at the same darkness). The
--- nearest Config.MaxBoxesDrawn boxes are drawn; a whole deck is usually far fewer.
-local function DarkGroups(eye, forward, now)
-    local reach = Config.BoxPadding + Config.BleedDistance
-    local boxes = {}
-    for _, entry in pairs(LE.ClientOutages) do
-        local section = LE.GetSection(entry.deck, entry.sectionId)
-        local darkness = section and LE.SectionDarkness(entry, now) or 0
-        if darkness > 0.005 then
-            for _, box in ipairs(section.Areas or {}) do
-                local distance = LE.DistanceToBox(box, eye)
-                if distance < Config.SectionDrawDistance + reach and not BehindCamera(box, reach, eye, forward) then
-                    table.insert(boxes, { box = box, darkness = darkness, distance = distance })
-                end
-            end
+hook.Add("Think", "LightingEditor.Outages", function()
+    local now = CurTime()
+    local ply = LocalPlayer()
+
+    if now >= nextDeckCheck and IsValid(ply) then
+        nextDeckCheck = now + 0.2
+        -- Between decks (turbolift shafts, gaps), stay on the last one.
+        local deck = LE.FindDeck(ply:WorldSpaceCenter())
+        if deck and deck ~= LE.CurrentDeck then
+            levelAtDeckChange = current
+            deckChangedAt = now
+            LE.CurrentDeck = deck
         end
     end
-    table.sort(boxes, function(a, b) return a.distance < b.distance end)
 
-    local groups, byDarkness = {}, {}
-    for i = 1, math.min(#boxes, Config.MaxBoxesDrawn) do
-        local item = boxes[i]
-        local group = byDarkness[item.darkness]
-        if not group then
-            group = { darkness = item.darkness, boxes = {} }
-            byDarkness[item.darkness] = group
-            table.insert(groups, group)
-        end
-        table.insert(group.boxes, item.box)
+    local target = TargetDarkness(now)
+    local blend = (now - deckChangedAt) / Config.DeckChangeTime
+    if blend < 1 then
+        current = levelAtDeckChange + (target - levelAtDeckChange) * blend
+    else
+        current = target
     end
-    return groups
-end
 
-hook.Add("PostDrawTranslucentRenderables", "LightingEditor.Outages", function(drawingDepth, drawingSkybox, drawing3DSkybox)
-    if drawingDepth or drawingSkybox or drawing3DSkybox then return end
+    Apply(current)
+end)
 
-    local eye = EyePos()
-    for _, group in ipairs(DarkGroups(eye, EyeAngles():Forward(), CurTime())) do
-        DrawDarkness(group.boxes, group.darkness, eye)
+-- Models: the engine lights them from the map's baked lighting, which the
+-- materials above don't reach, so while the lights are out they're drawn with
+-- only a little flat light instead.
+local modelsDark = false
+
+hook.Add("PreDrawOpaqueRenderables", "LightingEditor.Models", function(drawingDepth, drawingSkybox, drawing3DSkybox)
+    modelsDark = false
+    if not Config.DarkenModels or drawingDepth or drawingSkybox or drawing3DSkybox then return end
+    if Config.DarkLevel <= 0 or current < Config.DarkLevel * 0.5 then return end
+
+    local light = Config.ModelLight
+    render.SuppressEngineLighting(true)
+    render.ResetModelLighting(light, light, light)
+    render.SetLocalModelLights({})
+    modelsDark = true
+end)
+
+hook.Add("PostDrawTranslucentRenderables", "LightingEditor.Models", function()
+    if modelsDark then
+        render.SuppressEngineLighting(false)
+        modelsDark = false
     end
 end)
