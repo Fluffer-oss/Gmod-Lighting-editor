@@ -4,7 +4,7 @@ Lighting tools for Garry's Mod Star Trek RP, built on the section system of [Sta
 
 ## Power outages
 
-Cut power to a deck, and for everyone on it the lights stutter and die: the walls, floors, static props, doors, props and players lose their light, cubemap reflections dim, and everything that glows goes out. STM's LCARS screens, force fields and alert lights stay on and light up the dark around them. Flashlights still work. Restore it and the lights struggle back on. Changing power never freezes the game.
+Cut power to a deck, and for everyone on it the lights stutter and die: the walls, floors, static props, doors, props and players lose their light, cubemap reflections dim, and everything that glows goes out. STM's LCARS screens and force fields stay on and light up the dark around them. Flashlights still work. Restore it and the lights struggle back on. Changing power never freezes the game.
 
 ### Why it doesn't freeze
 
@@ -20,7 +20,7 @@ This addon never rebuilds anything. It changes material parameters, which costs 
 | Cubemap reflections | `$envmaptint` | On world and model materials. |
 | Static props, props, doors, NPCs, weapons | `$color2`, `$phongboost` | Their lighting and their highlights. |
 | Players, your weapon and hands | dimmed while drawn | Player colors come from a material proxy that would undo a material change. |
-| Anything that glows | texture swapped for black | Self-illuminated, additive and unlit materials, sprites, and `Config.LightMaterials`. Swapping the texture beats material proxies that animate a color (STM's bridge lights use one). |
+| Anything that glows | texture swapped for black | Self-illuminated, additive and unlit materials, sprites, and `Config.LightMaterials`. Swapping the texture beats material proxies that animate a color (STM's bridge lights use one). Listed lights go out wherever they're used, including the copies the map compiler makes for cubemaps (`maps/<map>/<name>_x_y_z`). |
 | The map's light entities | switched off by the server | Named lights, `light_dynamic`, `env_projectedtexture`, `point_spotlight`, and the sprites and glows on fixtures, on that deck. Ones that were already off stay off. |
 
 **Only the inside of the ship.** After you join, the addon reads the map file (read-only, in the background, a couple of milliseconds per frame at most) to find which material every surface uses and where, and where every static prop is. Then:
@@ -32,10 +32,9 @@ If the map file can't be read, it falls back to every material the world uses.
 
 ### STM's light sources
 
-These keep running with the power out, and give off real dynamic light. While the deck is dark, their light is raised by the same amount everything else is dimmed, so they light the room as brightly as they would with the power on. The nearest 12 are lit (`Config.Emitters.MaxLights`).
+These keep running with the power out, and give off real dynamic light. The nearest 12 are lit (`Config.Emitters.MaxLights`). While the deck is dark, their light is raised to show, at most `Config.Emitters.MaxBoost` (2) times. Static props can't receive dynamic light, so raising it further lights the walls far more than the props around them, which turns the props into black cutouts.
 - **LCARS screens:** light the average color of what they show, from their face outward. A bigger screen lights a bigger area. During red alert they light STM's red.
 - **Force fields:** light the color of their texture. The average color comes from the texture file, tinted by the material and the field's own color.
-- **Alert lights:** every fixture using STM's alert material (`light_alarm`) lights the alert's color while an alert is on.
 
 STM's alerts switch the bridge lights back on when they change; the server switches them back off if the bridge's deck has no power, and red alert's dimmed bridge lights stay off when power returns.
 
@@ -74,14 +73,13 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 - **`LightMaterials`:** materials that go black with the power, on top of everything that glows. On a test server, `sv_cheats 1` and `mat_crosshair 1` show the material you're looking at.
 - **`KeepMaterials`, `KeepClasses`:** materials (name patterns) and entity classes never touched. Add your hull's exterior materials if any get darkened.
 - **`InteriorDistance`:** how close to a section counts as inside the ship.
-- **`Emitters`:** brightness and reach of LCARS screens, force fields and alert lights, and how many are lit.
+- **`Emitters`:** brightness and reach of LCARS screens and force fields, how many are lit, and `MaxBoost`.
 - **`MapLights`:** which map light entities the server switches off, and how.
 - **Timing:** flicker and fade times, and `DeckChangeTime`. Also `DeckPadding` and sounds.
 
 ### Limits
 
 - **Materials are shared:** a material darkens everywhere the player can see it, so someone on a dark deck looking through a window at a lit deck sees it dark too.
-- **Emitter light on LDR:** emitters' boosted light needs HDR lightmaps (most maps) to reach full brightness in the dark; on an LDR map it's capped lower.
 - **Other addons' lights:** dynamic lights and projected textures from other addons (like flashlights) aren't touched.
 
 ## Tests
@@ -89,7 +87,7 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 `tests/` runs the real addon files in a mock Garry's Mod, with simulated materials and real binary game files (a map, models and a texture, built byte for byte by `tests/files.lua`):
 - **Map reading:** face materials, centers and areas, skipped sky and nodraw faces, static props, model materials and texture colors, and the fallback when the map can't be read.
 - **Darkening:** the exact values written to every kind of material. It checks what's left alone (the hull's outside, the skybox, STM's exterior, force fields, the alert material) and that everything returns to its exact original on restore. It also checks that nothing is written while nothing changes, and that the background scan is spread over frames.
-- **Emitters:** LCARS, force field and alert light colors, placement, size and brightness, and the light cap.
+- **Emitters:** LCARS and force field light colors, placement, size and brightness, the boost and light caps, and no light from alert fixtures.
 - **Server:** map lights switched off and back on per deck, lights that were already off, and STM's alert and bridge lights.
 - **Never freezes:** the mock errors if anything calls `engine.LightStyle` or `render.RedownloadAllLightmaps`.
 - **Everything else:** decks, flicker timing, fades, late joiners, sounds, commands, permissions and Helix commands.
