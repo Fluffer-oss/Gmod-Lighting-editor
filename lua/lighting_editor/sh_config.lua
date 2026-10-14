@@ -6,7 +6,14 @@ LE.Config = {
     -- Flashlights are unaffected.
     DarkLevel = 0.92,
 
-    -- Light fixtures: these materials go fully black when the power is out,
+    -- How a light fixture goes out: "glow" blacks out only its glowing parts
+    -- (anything brighter than GlowThreshold, 0-1, and whatever the material
+    -- marks as self-illuminated), keeping frames and detail; "black" blacks
+    -- out the whole texture.
+    GlowOff = "glow",
+    GlowThreshold = 0.7,
+
+    -- Light fixtures: these materials go out when the power is out,
     -- wherever they're used. Copies the map compiler made for cubemaps
     -- ("maps/<map>/<name>_x_y_z") count as the same material.
     LightMaterials = {
@@ -28,7 +35,7 @@ LE.Config = {
     -- Materials never touched: the sky, tool textures, and anything with
     -- these patterns in its name (Lua patterns). Add your hull's exterior
     -- materials here if any of them get darkened.
-    KeepMaterials = { "^skybox/", "^tools/", "exterior" },
+    KeepMaterials = { "^skybox/", "^tools/", "exterior", "^models/kingpommes/startrek/intrepid/core_effect$" },
     -- Entity classes never touched (STM's own light sources and things drawn separately).
     KeepClasses = {
         force_field = true, player = true, viewmodel = true, gmod_hands = true,

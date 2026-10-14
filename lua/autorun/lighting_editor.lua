@@ -4,6 +4,7 @@ if SERVER then
     AddCSLuaFile(BASE .. "sh_config.lua")
     AddCSLuaFile(BASE .. "sh_sections.lua")
     AddCSLuaFile(BASE .. "cl_mapdata.lua")
+    AddCSLuaFile(BASE .. "cl_glowtextures.lua")
     AddCSLuaFile(BASE .. "cl_materials.lua")
     AddCSLuaFile(BASE .. "cl_outage.lua")
     AddCSLuaFile(BASE .. "cl_emitters.lua")
@@ -17,6 +18,7 @@ if SERVER then
     include(BASE .. "sv_maplights.lua")
 else
     include(BASE .. "cl_mapdata.lua")
+    include(BASE .. "cl_glowtextures.lua")
     include(BASE .. "cl_materials.lua")
     include(BASE .. "cl_outage.lua")
     include(BASE .. "cl_emitters.lua")

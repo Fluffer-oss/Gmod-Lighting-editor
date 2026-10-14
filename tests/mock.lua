@@ -37,6 +37,15 @@ M.errors = {}
 M.materials, M.worldMaterials, M.entities, M.serverEntities, M.files = {}, {}, {}, {}, {}
 M.sysTime, M.sysTimeStep = 0, 0.00005
 
+-- A texture: w x h pixels, each {r, g, b, a} from 0 to 1.
+function M.Texture(name, w, h, pixels)
+    local t = { textureName = name, w = w or 0, h = h or 0, pixels = pixels or {} }
+    function t:Width() return self.w end
+    function t:Height() return self.h end
+    function t:GetName() return self.textureName end
+    return t
+end
+
 function M.MakePlayer(name, admin)
     local p = { __valid = true, name = name, admin = admin, pos = Vector(0, 0, 0), chat = {} }
     function p:IsAdmin() return self.admin end
@@ -156,7 +165,7 @@ function M.NewRealm(isServer, localPlayer)
         env.materialWrites = 0
         env.Material = function(name)
             local def = env.materialDefs[string.lower(name)]
-            local mat = {}
+            local mat = { name = string.lower(name) }
             local function get(param, kind)
                 local v = def and def.params[param]
                 if v == nil then return nil end
@@ -168,7 +177,8 @@ function M.NewRealm(isServer, localPlayer)
             local function set(param, v)
                 assert(def, "writing to a missing material")
                 def.params[param] = v
-                env.materialWrites = env.materialWrites + 1
+                -- Only the game's own materials count, not the addon's working ones.
+                if not name:lower():find("^lightingeditor_") then env.materialWrites = env.materialWrites + 1 end
             end
             function mat:IsError() return def == nil end
             function mat:GetShader() return def and def.shader end
@@ -182,10 +192,29 @@ function M.NewRealm(isServer, localPlayer)
             function mat:SetTexture(param, t) assert(type(t) == "table" and t.textureName, "SetTexture needs a texture") set(param, t) end
             return mat
         end
+        -- Textures and render targets: { textureName, w, h, pixels = { {r,g,b,a} 0-1, ... } }.
         env.renderTargets = {}
-        env.GetRenderTarget = function(name)
-            env.renderTargets[name] = env.renderTargets[name] or { textureName = name, cleared = nil }
+        local function RT(name, w, h)
+            if not env.renderTargets[name] then
+                local t = M.Texture(name, w, h)
+                for i = 1, w * h do t.pixels[i] = { 0, 0, 0, 0 } end
+                env.renderTargets[name] = t
+            end
             return env.renderTargets[name]
+        end
+        env.GetRenderTarget = function(name, w, h) return RT(name, w, h) end
+        env.GetRenderTargetEx = function(name, w, h, sizeMode, depthMode, textureFlags, rtFlags, format)
+            assert(sizeMode == env.RT_SIZE_LITERAL and depthMode == env.MATERIAL_RT_DEPTH_NONE and format == env.IMAGE_FORMAT_RGBA8888)
+            return RT(name, w, h)
+        end
+        env.RT_SIZE_LITERAL, env.MATERIAL_RT_DEPTH_NONE, env.IMAGE_FORMAT_RGBA8888 = 1, 2, 0
+        env.BLEND_ZERO, env.BLEND_ONE, env.BLEND_SRC_ALPHA, env.BLEND_ONE_MINUS_SRC_COLOR = 0, 1, 4, 10
+        env.BLENDFUNC_ADD, env.BLENDFUNC_REVERSE_SUBTRACT, env.BLENDFUNC_MAX = 0, 2, 4
+        env.CreateMaterial = function(name, shader, params)
+            local copy = {}
+            for k, v in pairs(params) do copy[k] = v end
+            env.materialDefs[string.lower(name)] = { shader = shader, params = copy }
+            return env.Material(name)
         end
         env.game.GetWorld = function() return { GetMaterials = function() return M.worldMaterials end } end
         local function clientEnts() local t = {} for _, e in ipairs(M.entities) do if e.__valid then table.insert(t, e) end end return t end
@@ -200,12 +229,74 @@ function M.NewRealm(isServer, localPlayer)
         env.dlights = {}
         env.DynamicLight = function(index) env.dlights[index] = env.dlights[index] or {} return env.dlights[index] end
 
-        local target
+        -- Drawing into render targets, pixel by pixel, with real blend rules.
+        local target, blend, drawColor, drawMat, in2D
+        local function factor(f, src, dst, c)
+            if f == env.BLEND_ZERO then return 0 end
+            if f == env.BLEND_ONE then return 1 end
+            if f == env.BLEND_SRC_ALPHA then return src[4] end
+            if f == env.BLEND_ONE_MINUS_SRC_COLOR then return 1 - src[c] end
+            error("blend factor not simulated: " .. tostring(f))
+        end
+        local function combine(op, a, b)
+            if op == env.BLENDFUNC_ADD then return a + b end
+            if op == env.BLENDFUNC_REVERSE_SUBTRACT then return b - a end
+            if op == env.BLENDFUNC_MAX then return math.max(a, b) end
+            error("blend op not simulated: " .. tostring(op))
+        end
+        local function Fill(source) -- source(i) -> {r,g,b,a} for each target pixel
+            assert(target and in2D, "drawing outside a render target / cam.Start2D")
+            assert(blend, "draws here set their blend mode explicitly")
+            for i, dst in ipairs(target.pixels) do
+                local src = source(i)
+                local out = {}
+                for c = 1, 4 do
+                    local sf, df, op = blend[1], blend[2], blend[3]
+                    if c == 4 and blend[4] then sf, df, op = blend[4], blend[5], blend[6] end
+                    out[c] = math.min(1, math.max(0, combine(op, src[c] * factor(sf, src, dst, c), dst[c] * factor(df, src, dst, c))))
+                end
+                target.pixels[i] = out
+            end
+        end
+        local function Texel(texture, i)
+            assert(type(texture) == "table" and texture.pixels, "drawing a texture with no pixels: " .. tostring(type(texture) == "table" and texture.textureName or texture))
+            assert(#texture.pixels == #target.pixels, "texture and target sizes differ")
+            return texture.pixels[i]
+        end
+        env.cam = { Start2D = function() in2D = true end, End2D = function() in2D = false end }
+        env.surface.SetDrawColor = function(r, g, b, a) drawColor = { r / 255, g / 255, b / 255, (a or 255) / 255 } end
+        env.surface.SetMaterial = function(mat) drawMat = mat end
+        env.surface.DrawRect = function() Fill(function() return drawColor end) end
+        env.surface.DrawTexturedRect = function()
+            local def = env.materialDefs[drawMat.name]
+            Fill(function(i)
+                if def.shader == "g_colourmodify" then
+                    assert(def.params["$pp_colour_colour"] == 0 and def.params["$pp_colour_contrast"] == 1 and def.params["$pp_colour_brightness"] == 0)
+                    local p = Texel(def.params["$fbtexture"], i)
+                    local l = 0.299 * p[1] + 0.587 * p[2] + 0.114 * p[3]
+                    return { l, l, l, 1 }
+                end
+                assert(def.shader == "UnlitGeneric")
+                local p = Texel(def.params["$basetexture"], i)
+                -- Only a translucent material outputs the texture's alpha; an opaque
+                -- one's alpha can't be relied on (Source may write depth there).
+                local a = def.params["$translucent"] == 1 and p[4] * drawColor[4] or 1
+                return { p[1] * drawColor[1], p[2] * drawColor[2], p[3] * drawColor[3], a }
+            end)
+        end
+
         env.modulation = { 1, 1, 1 }
         env.render = {
-            PushRenderTarget = function(rt) target = rt end,
-            Clear = function(r, g, b, a) assert(target) target.cleared = { r, g, b, a } end,
+            PushRenderTarget = function(rt) assert(not target, "nested render targets") target = rt end,
+            Clear = function(r, g, b, a)
+                assert(target)
+                target.cleared = { r, g, b, a }
+                for i in ipairs(target.pixels) do target.pixels[i] = { r / 255, g / 255, b / 255, a / 255 } end
+            end,
             PopRenderTarget = function() target = nil end,
+            OverrideBlend = function(on, sf, df, op, saf, daf, aop)
+                blend = on and { sf, df, op, saf, daf, aop } or nil
+            end,
             SetColorModulation = function(r, g, b) env.modulation = { r, g, b } end,
             RedownloadAllLightmaps = function() error("lightmaps must never be redownloaded") end
         }

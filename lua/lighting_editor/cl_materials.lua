@@ -1,9 +1,10 @@
 local LE = LightingEditor
 local Config = LE.Config
 
--- Everything inside the ship that's lit, and how each kind is darkened. Changing
--- a material parameter costs nothing (no lightmap rebuild), so this can fade.
+-- Everything inside the ship that's lit, and how it's darkened. Changing a
+-- material parameter costs nothing (no lightmap rebuild), so this can fade.
 --
+-- Its light (by shader):
 --  world  Lightmapped surfaces: walls, floors, brush doors. $color scales only
 --         the light from the lightmap (flashlights are drawn in a separate pass
 --         it doesn't touch); $envmaptint scales the cubemap reflections.
@@ -12,17 +13,24 @@ local Config = LE.Config
 --         Model shaders convert $color2 and $envmaptint from gamma to linear
 --         before using them (world shaders don't), so these get the value
 --         that comes out as the same linear scale as the world: see LE.ModelTint.
---  glow   Anything that gives off its own light: self-illuminated, additive and
---         unlit materials, sprites, and Config.LightMaterials. Its texture is
---         swapped for black, which beats any material proxy that animates its
---         color (STM's bridge lights use one).
+--
+-- Its own glow (by what it is), on top of that:
+--  "parts"  Config.LightMaterials: the glowing parts of its texture (the bright
+--           parts, and whatever it marks as self-illuminated) go black.
+--  "marked" Self-illuminated materials (a wall with a glowing strip, a panel):
+--           only what it marks as self-illuminated goes black.
+--  "all"    Additive materials and sprites (light cones, glows) are pure light:
+--           they go out entirely.
+-- The texture is swapped for a copy made by cl_glowtextures.lua, which beats
+-- any material proxy that animates its color (STM's bridge lights use one).
+-- Plain unlit materials (labels, signs, screens) are left alone.
 --
 -- Only materials used inside the ship are touched: world materials with most of
 -- their area near a section, and props and entities near one. The hull's
 -- outside, the skybox and STM's exterior keep their own lighting.
 
-local WORLD, MODEL, GLOW = "world", "model", "glow"
-LE.MaterialKinds = { WORLD = WORLD, MODEL = MODEL, GLOW = GLOW }
+local WORLD, MODEL = "world", "model"
+LE.MaterialKinds = { WORLD = WORLD, MODEL = MODEL }
 
 -- name -> tracked material, or false for materials that are left alone.
 LE.Tracked = LE.Tracked or {}
@@ -62,32 +70,38 @@ function LE.BaseMaterialName(name)
     return (base:gsub("_%-?%d+_%-?%d+_%-?%d+$", ""))
 end
 
--- Which kind a material is, or nil to leave it alone.
+-- How a material's light (kind: "world", "model" or nil) and its own glow
+-- (nil, "parts", "marked" or "all") are darkened. nil, nil = leave it alone.
 function LE.ClassifyMaterial(name, mat)
     local base = LE.BaseMaterialName(name)
     for _, pattern in ipairs(Config.KeepMaterials or {}) do
-        if name:find(pattern) or base:find(pattern) then return nil end
+        if name:find(pattern) or base:find(pattern) then return nil, nil end
     end
     -- STM drives the alert light material itself.
-    if base == AlertMaterial() then return nil end
-    if IsListedLight(base) then return GLOW end
+    if base == AlertMaterial() then return nil, nil end
 
     local shader = string.lower(mat:GetShader() or "")
     if shader:find("water", 1, true) or shader:find("refract", 1, true) or shader:find("sky", 1, true) then
-        return nil
+        return nil, nil
     end
-    local flags = mat:GetInt("$flags") or 0
-    if HasFlag(flags, SELFILLUM) or HasFlag(flags, ADDITIVE) or (mat:GetInt("$emissiveblendenabled") or 0) ~= 0
-        or shader:find("unlit", 1, true) or shader:find("sprite", 1, true) then
-        return GLOW
-    end
+
+    local kind
     if shader:find("lightmapped", 1, true) or shader:find("worldvertextransition", 1, true) then
-        return WORLD
+        kind = WORLD
+    elseif shader:find("vertexlit", 1, true) or shader:find("eyes", 1, true) or shader:find("teeth", 1, true) then
+        kind = MODEL
     end
-    if shader:find("vertexlit", 1, true) or shader:find("eyes", 1, true) or shader:find("teeth", 1, true) then
-        return MODEL
+
+    local flags = mat:GetInt("$flags") or 0
+    local glow
+    if IsListedLight(base) then
+        glow = "parts"
+    elseif HasFlag(flags, ADDITIVE) or shader:find("sprite", 1, true) then
+        glow = "all"
+    elseif HasFlag(flags, SELFILLUM) or (mat:GetInt("$emissiveblendenabled") or 0) ~= 0 then
+        glow = "marked"
     end
-    return nil
+    return kind, glow
 end
 
 --------------------------------------------------------------------------------
@@ -99,7 +113,7 @@ hook.Add("PreRender", "LightingEditor.BlackTexture", function()
     if blackTexture then return end
     blackTexture = GetRenderTarget("lightingeditor_black", 4, 4)
     render.PushRenderTarget(blackTexture)
-    render.Clear(0, 0, 0, 255)
+    render.Clear(0, 0, 0, 0) -- transparent: nothing where a texture was see-through
     render.PopRenderTarget()
     LE.SetLighting(LE.Lighting.k, LE.Lighting.lightsOff)
 end)
@@ -122,20 +136,28 @@ local function Apply(tracked)
     local lighting = LE.Lighting
     local mat = tracked.mat
 
-    if tracked.kind == GLOW then
+    if tracked.glow then
         local off = lighting.lightsOff and blackTexture ~= nil
-        if tracked.off == off then return end
-        tracked.off = off
         if tracked.texture then
-            mat:SetTexture("$basetexture", off and blackTexture or tracked.texture)
+            -- Its glowing parts blacked out once that copy is made. Until then (or if
+            -- it can't be made), a listed light or pure light goes all black; a
+            -- surface that just has some glowing parts is left as it is.
+            local fallback = tracked.glow == "marked" and tracked.texture or blackTexture
+            local texture = off and (tracked.offTexture or fallback) or tracked.texture
+            if tracked.appliedTexture ~= texture then
+                tracked.appliedTexture = texture
+                mat:SetTexture("$basetexture", texture)
+            end
         end
-        for param, original in pairs(tracked.vectors) do
-            mat:SetVector(param, off and Vector(0, 0, 0) or original)
+        if tracked.off ~= off then
+            tracked.off = off
+            for param, original in pairs(tracked.offVectors) do
+                mat:SetVector(param, off and Vector(0, 0, 0) or original)
+            end
         end
-        return
     end
 
-    if tracked.k == lighting.k then return end
+    if not tracked.kind or tracked.k == lighting.k then return end
     tracked.k = lighting.k
     for param, original in pairs(tracked.vectors) do
         mat:SetVector(param, ScaleVector(original, lighting.k, tracked.kind))
@@ -153,45 +175,64 @@ local function Track(name)
 
     local mat = Material(name)
     if not mat or mat:IsError() then return nil end
-    local kind = LE.ClassifyMaterial(name, mat)
-    if not kind then
+    local kind, glow = LE.ClassifyMaterial(name, mat)
+    if not kind and not glow then
         LE.Tracked[name] = false
         return nil
     end
 
-    local tracked = { name = name, mat = mat, kind = kind, vectors = {}, floats = {}, k = 1, off = false }
-    local function Vec(param, default)
+    local tracked = { name = name, mat = mat, kind = kind, glow = glow, vectors = {}, offVectors = {}, floats = {}, k = 1, off = false }
+    LE.Tracked[name] = tracked
+    local function Vec(list, param, default)
         local value = mat:GetVector(param)
         if value then
-            tracked.vectors[param] = Vector(value)
+            list[param] = Vector(value)
         elseif default then
-            tracked.vectors[param] = Vector(1, 1, 1)
+            list[param] = Vector(1, 1, 1)
         end
     end
     local hasEnvmap = (mat:GetString("$envmap") or "") ~= ""
 
+    -- Its light.
     if kind == WORLD then
-        Vec("$color", true)
-        if hasEnvmap then Vec("$envmaptint", true) end
+        Vec(tracked.vectors, "$color", true)
+        if hasEnvmap then Vec(tracked.vectors, "$envmaptint", true) end
     elseif kind == MODEL then
-        Vec("$color2", true)
-        if hasEnvmap then Vec("$envmaptint", true) end
+        Vec(tracked.vectors, "$color2", true)
+        if hasEnvmap then Vec(tracked.vectors, "$envmaptint", true) end
         if (mat:GetInt("$phong") or 0) ~= 0 then
             tracked.floats["$phongboost"] = mat:GetFloat("$phongboost") or 1
         end
-    else
-        if (mat:GetString("$basetexture") or "") ~= "" then
-            tracked.texture = mat:GetTexture("$basetexture")
-        else
-            Vec("$color", true)
-            Vec("$color2", false)
-        end
-        if hasEnvmap then Vec("$envmaptint", true) end
-        if (mat:GetInt("$emissiveblendenabled") or 0) ~= 0 then Vec("$emissiveblendtint", true) end
     end
 
-    LE.Tracked[name] = tracked
+    -- Its glow.
+    if glow then
+        if (mat:GetInt("$emissiveblendenabled") or 0) ~= 0 then Vec(tracked.offVectors, "$emissiveblendtint", true) end
+        if (mat:GetString("$basetexture") or "") ~= "" then
+            tracked.texture = mat:GetTexture("$basetexture")
+            tracked.appliedTexture = tracked.texture
+            local emissive
+            if HasFlag(mat:GetInt("$flags") or 0, SELFILLUM) then
+                -- What it marks as glowing: a $selfillummask, or else its texture's alpha.
+                emissive = (mat:GetString("$selfillummask") or "") ~= "" and mat:GetTexture("$selfillummask") or "alpha"
+            end
+            local wantsCopy = glow == "marked" and emissive or glow == "parts" and Config.GlowOff == "glow"
+            if wantsCopy then
+                LE.RequestDarkGlow(tracked.texture, emissive, glow == "parts", function(texture)
+                    tracked.offTexture = texture
+                    if tracked.registered then Apply(tracked) end
+                end)
+            end
+        elseif not kind then
+            -- Pure color, no texture (lights/white): all of it goes out.
+            Vec(tracked.offVectors, "$color", true)
+            Vec(tracked.offVectors, "$color2", false)
+        end
+        if hasEnvmap and not kind then Vec(tracked.offVectors, "$envmaptint", true) end
+    end
+
     table.insert(trackedList, tracked)
+    tracked.registered = true
     Apply(tracked)
     return tracked
 end

@@ -20,7 +20,10 @@ This addon never rebuilds anything. It changes material parameters, which costs 
 | Cubemap reflections | `$envmaptint` | On world and model materials. |
 | Static props, props, doors, NPCs, weapons | `$color2`, `$phongboost` | Their lighting and their highlights. Model shaders convert `$color2` (and `$envmaptint`, and the per-model color) from gamma to linear before using them, which world shaders don't, so models get the value that comes out as the same linear scale as the walls. Without that, props end up about 20× darker than the walls around them. |
 | Players, your weapon and hands | dimmed while drawn | Player colors come from a material proxy that would undo a material change. |
-| Anything that glows | texture swapped for black | Self-illuminated, additive and unlit materials, sprites, and `Config.LightMaterials`. Swapping the texture beats material proxies that animate a color (STM's bridge lights use one). Listed lights go out wherever they're used, including the copies the map compiler makes for cubemaps (`maps/<map>/<name>_x_y_z`). |
+| Light fixtures (`Config.LightMaterials`) | glowing parts blacked out | Their bright parts (above `GlowThreshold`, 0.7) and whatever the material marks as self-illuminated go black; frames, markings and detail stay, and the fixture is darkened like any surface. `GlowOff = "black"` blacks out the whole texture instead. Copies the map compiler makes for cubemaps (`maps/<map>/<name>_x_y_z`) count too. |
+| Self-illuminated surfaces (a wall with a glowing strip) | marked parts blacked out | Darkened like any surface, and only what the material marks as glowing (its `$selfillummask`, or its texture's alpha) goes black. White paint stays white. |
+| Pure light (additive materials, sprites) | out entirely | Light cones and glows. |
+| Plain unlit materials (labels, signs, screens) | left alone | |
 | The map's light entities | switched off by the server | Named lights, `light_dynamic`, `env_projectedtexture`, `point_spotlight`, and the sprites and glows on fixtures, on that deck. Ones that were already off stay off. |
 
 **Only the inside of the ship.** After you join, the addon reads the map file (read-only, in the background, a couple of milliseconds per frame at most) to find which material every surface uses and where, and where every static prop is. Then:
@@ -37,6 +40,16 @@ These keep running with the power out, and give off real dynamic light. The near
 - **Force fields:** light the color of their texture. The average color comes from the texture file, tinted by the material and the field's own color.
 
 STM's alerts switch the bridge lights back on when they change; the server switches them back off if the bridge's deck has no power, and red alert's dimmed bridge lights stay off when power returns.
+
+### How a light's glowing parts are blacked out
+
+Swapping a texture for a copy beats material proxies that animate a color (STM's bridge lights use one). Each copy is made once, in the background, one texture per frame, on the graphics card:
+1. The texture's brightness (gray, via GMod's color-modify shader), minus the threshold.
+2. That, stretched so anything clearly bright becomes 1.
+3. Whichever is more, that or the material's self-illumination mask.
+4. The texture, alpha and all, times 1 minus that.
+
+Until a copy is ready (or if one can't be made), a listed light goes all black (transparent black, so see-through parts stay see-through) and a surface with glowing parts is left as it is.
 
 ### Which deck you're on
 
@@ -71,7 +84,8 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 `lua/lighting_editor/sh_config.lua` has:
 - **`DarkLevel`:** how much light a dead deck loses (0.92 by default).
 - **`LightMaterials`:** materials that go black with the power, on top of everything that glows. On a test server, `sv_cheats 1` and `mat_crosshair 1` show the material you're looking at.
-- **`KeepMaterials`, `KeepClasses`:** materials (name patterns) and entity classes never touched. Add your hull's exterior materials if any get darkened.
+- **`GlowOff`, `GlowThreshold`:** whether listed lights lose only their glowing parts or go all black, and how bright counts as glowing.
+- **`KeepMaterials`, `KeepClasses`:** materials (name patterns) and entity classes never touched (`core_effect` is in there). Add your hull's exterior materials if any get darkened.
 - **`InteriorDistance`:** how close to a section counts as inside the ship.
 - **`Emitters`:** brightness and reach of LCARS screens and force fields, how many are lit, and `MaxBoost`.
 - **`MapLights`:** which map light entities the server switches off, and how.

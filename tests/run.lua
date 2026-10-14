@@ -44,7 +44,8 @@ local ALARM = "models/kingpommes/startrek/intrepid/light_alarm"
 local BRIDGE_LIGHT = "models/kingpommes/startrek/intrepid/light_bridge_ceiling"
 local CORRIGATED = "kingpommes/startrek/intrepid/wall_corrigated"
 local SELFILLUM, ADDITIVE = 64, 128
-local function tex(name) return { textureName = name } end
+local function tex(name, pixels, w) return M.Texture(name, w or (pixels and #pixels) or 0, pixels and 1 or 0, pixels) end
+local WHITE, NAVY, GREY, YELLOW = { 1, 1, 1, 1 }, { 0.1, 0.2, 0.5, 1 }, { 0.5, 0.5, 0.5, 1 }, { 1, 0.9, 0.2, 0.5 }
 
 -- The map's world faces: inside the ship (near a section), on the hull's
 -- outside, and in the sky.
@@ -84,14 +85,19 @@ M.materials = {
     ["maps/hull"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
     ["maps/mixed"] = { shader = "WorldVertexTransition", params = { ["$color"] = V(0.5, 0.8, 1) } },
     ["maps/hullmostly"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
-    ["maps/glowstrip"] = { shader = "LightmappedGeneric", params = { ["$flags"] = SELFILLUM, ["$basetexture"] = tex("maps/glowstrip"), ["$selfillumtint"] = V(1, 1, 1) } },
+    -- A wall with a glowing strip: the strip is marked in the texture's alpha.
+    ["maps/glowstrip"] = { shader = "LightmappedGeneric", params = { ["$flags"] = SELFILLUM, ["$color"] = V(1, 1, 1),
+        ["$basetexture"] = tex("maps/glowstrip", { { 1, 1, 0.8, 1 }, { 0.4, 0.4, 0.4, 0 }, { 1, 1, 1, 0 } }), ["$selfillumtint"] = V(1, 1, 1) } },
     ["maps/cubemapped"] = { shader = "LightmappedGeneric", params = { ["$envmap"] = "env_cubemap", ["$envmaptint"] = V(0.6, 0.6, 0.6) } },
     ["maps/water"] = { shader = "Water", params = { ["$color"] = V(1, 1, 1) } },
     ["maps/skyface"] = { shader = "LightmappedGeneric", params = {} },
     ["maps/nodraw"] = { shader = "LightmappedGeneric", params = {} },
     ["maps/stairs"] = { shader = "LightmappedGeneric", params = {} },
     ["maps/door"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
-    [CORRIGATED] = { shader = "LightmappedGeneric", params = { ["$basetexture"] = tex(CORRIGATED) } },
+    -- Listed: its bright parts go black, the rest stays (and darkens like any wall).
+    [CORRIGATED] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1), ["$basetexture"] = tex(CORRIGATED, { WHITE, NAVY, GREY, YELLOW }) } },
+    ["models/kingpommes/startrek/intrepid/core_effect"] = { shader = "UnlitGeneric", params = { ["$flags"] = ADDITIVE, ["$basetexture"] = tex("core_effect") } },
+    ["models/props/door_label"] = { shader = "UnlitGeneric", params = { ["$flags"] = 2097152, ["$basetexture"] = tex("models/props/door_label") } },
     ["maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8"] = { shader = "LightmappedGeneric", params = { ["$basetexture"] = tex("kingpommes/startrek/intrepid/eng_floorlight"), ["$envmap"] = "maps/rp_test/c120_-40_8" } },
     ["maps/rp_test/lights/white_2000_2000_64"] = { shader = "UnlitGeneric", params = { ["$basetexture"] = tex("lights/white") } },
     ["maps/rp_test/maps/hull_500_-2000_64"] = { shader = "LightmappedGeneric", params = { ["$color"] = V(1, 1, 1) } },
@@ -106,7 +112,10 @@ M.materials = {
     ["models/stm/forcefield"] = { shader = "UnlitGeneric", params = { ["$basetexture"] = "stm/forcefield", ["$color"] = V(1, 1, 1) } },
     [ALARM] = { shader = "VertexLitGeneric", params = { ["$alarmcolor"] = V(0, 0, 0), ["$basetexture"] = tex(ALARM) } },
     ["models/kingpommes/startrek/intrepid/alarm_frame"] = { shader = "VertexLitGeneric", params = {} },
-    [BRIDGE_LIGHT] = { shader = "VertexLitGeneric", params = { ["$flags"] = SELFILLUM, ["$basetexture"] = tex(BRIDGE_LIGHT), ["$brightness"] = 1 } },
+    -- Listed, with a separate self-illumination mask: masked or bright parts go black.
+    [BRIDGE_LIGHT] = { shader = "VertexLitGeneric", params = { ["$flags"] = SELFILLUM, ["$brightness"] = 1, ["$color2"] = V(1, 1, 1),
+        ["$basetexture"] = tex(BRIDGE_LIGHT, { { 0.3, 0.3, 0.3, 1 }, { 1, 1, 1, 1 }, { 0.3, 0.3, 0.3, 1 } }),
+        ["$selfillummask"] = tex("lightmask", { { 1, 1, 1, 1 }, { 0, 0, 0, 1 }, { 0, 0, 0, 1 } }) } },
     ["lights/white"] = { shader = "UnlitGeneric", params = { ["$color"] = V(1, 1, 1) } } -- no texture
 }
 M.worldMaterials = { "maps/floor", "maps/hull", "lights/white" }
@@ -128,13 +137,14 @@ local function Ent(class, model, pos, materials, extra)
     for k, v in pairs(extra or {}) do e[k] = v end
     return e
 end
-local door = Ent("prop_dynamic", "models/props/door.mdl", V(256, 0, 64), { "models/props/door_metal" })
+local door = Ent("prop_dynamic", "models/props/door.mdl", V(256, 0, 64), { "models/props/door_metal", "models/props/door_label" })
 local brushDoor = Ent("func_door", "*3", V(700, 128, 64), { "maps/door" })
 local beam = Ent("prop_dynamic", "models/props/beam.mdl", V(200, 200, 100), {}, { override = "models/props/beam_cone" })
 local field = Ent("force_field", "models/stm/forcefield.mdl", V(640, 128, 64), { "models/stm/forcefield" })
 local planet = Ent("prop_dynamic", "models/planets/earth.mdl", V(0, 0, -20000), { "models/planets/earth" })
 local lamp = Ent("prop_dynamic", "models/props/lamp.mdl", V(150, 150, 120), { BRIDGE_LIGHT, "lights/white" })
-M.entities = { door, brushDoor, beam, field, planet, lamp }
+local core = Ent("prop_dynamic", "models/props/warpcore.mdl", V(900, 128, 64), { "models/kingpommes/startrek/intrepid/core_effect" })
+M.entities = { door, brushDoor, beam, field, planet, lamp, core }
 
 -- Server-side map light entities.
 local function MapLight(class, name, pos, extra)
@@ -231,6 +241,10 @@ end
 local function P(realm, name, p) return realm.materialDefs[name].params[p] end
 local function floor(realm) return P(realm, "maps/floor", "$color").x end
 local function isBlack(realm, name) local t = P(realm, name, "$basetexture") return type(t) == "table" and t.textureName == "lightingeditor_black" end
+-- Switched to a copy with its glowing parts black.
+local function isCopy(realm, name) local t = P(realm, name, "$basetexture") return type(t) == "table" and t.textureName:find("^lightingeditor_glow_") ~= nil end
+local function isOff(realm, name) return isBlack(realm, name) or isCopy(realm, name) end
+local function pix(p, r, g, b, a) return near(p[1], r) and near(p[2], g) and near(p[3], b) and near(p[4], a) end
 local function liveLights(realm)
     local list = {}
     for _, l in pairs(realm.dlights) do if l.dietime and l.dietime > M.time then table.insert(list, l) end end
@@ -312,7 +326,7 @@ step("cut power to deck 1: flicker, then dark", function()
     while M.time < stop do
         RunTo(M.time + 0.05)
         seen[floor(crewCl) < 0.5 and "dark" or "lit"] = true
-        seen[isBlack(crewCl, CORRIGATED) and "off" or "on"] = true
+        seen[isOff(crewCl, CORRIGATED) and "off" or "on"] = true
     end
     check(seen.dark and seen.lit and seen.off and seen.on, "lights flicker before dying")
     RunTo(M.time + 10)
@@ -336,26 +350,50 @@ step("deck 1 without power: props, entities and glow", function()
     check(near(P(c, "models/props/console", "$color2").x ^ 2.2, K), "(linear: " .. K .. ")")
     check(near(P(c, "models/props/console", "$phongboost"), 2 * K), "and its highlights")
     check(vnear(P(c, "models/props/console", "$envmaptint"), MK(1), MK(1), MK(1)), "and its reflections")
-    check(isBlack(c, "models/props/console_screen"), "static prop's glowing screen off")
+    check(isBlack(c, "models/props/console_screen") == false and P(c, "models/props/console_screen", "$basetexture").textureName == "models/props/console_screen",
+        "static prop's screen, self-illuminated but with no glow marked in its (empty) texture, kept")
     check(P(c, "models/props/asteroid", "$color2").x == 1, "3D skybox prop untouched")
     check(vnear(P(c, "models/props/door_metal", "$color2"), MK(0.9), MK(0.9), MK(0.9)), "door (entity) dark, from its own color")
     local LE = c.LightingEditor
     check(near(LE.ModelTint(2, 0.75), 1.5) and near(LE.ModelTint(2, 0.25) ^ 2.2, 0.5), "overbright tints (above 1, which the shader leaves linear)")
-    check(isBlack(c, "models/props/beam_cone"), "additive light cone (material override) off")
+    check(isBlack(c, "models/props/beam_cone"), "additive light cone (material override) out entirely")
+    local black = c.renderTargets.lightingeditor_black
+    check(black.cleared[4] == 0, "with transparent black, so nothing shows where it was see-through")
+    check(P(c, "models/props/door_label", "$basetexture").textureName == "models/props/door_label", "door label (plain unlit) untouched")
+    check(P(c, "models/kingpommes/startrek/intrepid/core_effect", "$basetexture").textureName == "core_effect", "core_effect excluded")
     check(P(c, "models/planets/earth", "$color2").x == 1, "STM exterior (planet far outside) untouched")
     check(P(c, "models/stm/forcefield", "$basetexture") == "stm/forcefield" and P(c, "models/stm/forcefield", "$color").x == 1, "force field untouched")
-    check(isBlack(c, "maps/glowstrip"), "self-illuminated wall strip off")
-    check(isBlack(c, CORRIGATED), "wall_corrigated (listed) black")
-    check(isBlack(c, "maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8"), "eng_floorlight (listed) black in its cubemap copy")
-    check(isBlack(c, "models/kingpommes/startrek/intrepid/light_white"), "light_white (listed) black though nothing found uses it")
+    -- The wall with a glowing strip: darkened like a wall, and only the strip goes black.
+    check(near(P(c, "maps/glowstrip", "$color").x, K), "self-illuminated wall darkened like any wall")
+    check(isCopy(c, "maps/glowstrip"), "and its texture swapped for the copy")
+    local strip = P(c, "maps/glowstrip", "$basetexture").pixels
+    check(pix(strip[1], 0, 0, 0, 1), "the part marked as glowing is black")
+    check(pix(strip[2], 0.4, 0.4, 0.4, 0), "the rest is exactly as it was, alpha too")
+    check(pix(strip[3], 1, 1, 1, 0), "even white parts it doesn't mark as glowing (white paint isn't a light)")
+
+    -- wall_corrigated (listed): darkened like a wall, and its bright parts black.
+    check(near(P(c, CORRIGATED, "$color").x, K), "wall_corrigated darkened like any wall, not all black")
+    check(isCopy(c, CORRIGATED), "with its glowing parts blacked out")
+    local wall = P(c, CORRIGATED, "$basetexture").pixels
+    local t = 179 / 255 -- GlowThreshold 0.7, as the 0-255 color it's drawn with
+    local function kept(p) local l = 0.299 * p[1] + 0.587 * p[2] + 0.114 * p[3] return 1 - math.min(1, math.max(0, l - t) * 4) end
+    check(pix(wall[1], 0, 0, 0, 1), "white: black")
+    check(pix(wall[2], 0.1, 0.2, 0.5, 1), "dark blue: kept")
+    check(pix(wall[3], 0.5, 0.5, 0.5, 1), "mid gray: kept")
+    check(pix(wall[4], 1 * kept(YELLOW), 0.9 * kept(YELLOW), 0.2 * kept(YELLOW), 0.5) and kept(YELLOW) > 0.3 and kept(YELLOW) < 0.5,
+        "bright yellow: mostly dark, and its alpha kept")
+    check(isOff(c, "maps/rp_test/kingpommes/startrek/intrepid/eng_floorlight_120_-40_8"), "eng_floorlight (listed) out in its cubemap copy")
+    check(isOff(c, "models/kingpommes/startrek/intrepid/light_white"), "light_white (listed) out though nothing found uses it")
     check(P(c, "maps/rp_test/maps/hull_500_-2000_64", "$color").x == 1, "cubemap copy on the outside untouched")
-    check(isBlack(c, "maps/rp_test/lights/white_2000_2000_64"), "listed fixture far from any section still goes out")
-    check(isBlack(c, BRIDGE_LIGHT), "bridge light off by texture, so STM's brightness proxy can't undo it")
+    check(isOff(c, "maps/rp_test/lights/white_2000_2000_64"), "listed fixture far from any section still goes out")
+    check(isCopy(c, BRIDGE_LIGHT), "bridge light off by texture, so STM's brightness proxy can't undo it")
+    local bridge = P(c, BRIDGE_LIGHT, "$basetexture").pixels
+    check(pix(bridge[1], 0, 0, 0, 1) and pix(bridge[2], 0, 0, 0, 1), "its masked part and its bright part black")
+    check(pix(bridge[3], 0.3, 0.3, 0.3, 1), "the rest kept")
+    check(vnear(P(c, BRIDGE_LIGHT, "$color2"), MK(1), MK(1), MK(1)), "and the fixture itself darkened like any prop")
     check(vnear(P(c, "lights/white", "$color"), 0, 0, 0), "lights/white (no texture) black by color")
     check(P(c, ALARM, "$basetexture").textureName == ALARM and P(c, ALARM, "$color2") == nil, "STM alert material untouched")
     check(crewCl.LightingEditor.BaseMaterialName("maps/rp_test/foo/bar_-1_2_-30") == "foo/bar" and crewCl.LightingEditor.BaseMaterialName("foo/bar_1_2_3") == "foo/bar_1_2_3", "cubemap copy names")
-    local black = c.renderTargets.lightingeditor_black
-    check(black.cleared[1] == 0 and black.cleared[2] == 0 and black.cleared[3] == 0, "the black texture is black")
 end)
 
 step("players, weapons and hands are dimmed while drawn", function()
@@ -482,7 +520,7 @@ step("taking the turbolift to deck 2: fades back to normal", function()
     check(mid > K + 0.05 and mid < 0.95, "fading, not snapping: " .. mid)
     RunTo(M.time + Config.DeckChangeTime)
     check(near(floor(crewCl), 1), "floor fully lit")
-    check(not isBlack(crewCl, BRIDGE_LIGHT), "lights back on")
+    check(not isOff(crewCl, BRIDGE_LIGHT), "lights back on")
     local writes = crewCl.materialWrites
     RunTo(M.time + 2)
     check(crewCl.materialWrites == writes, "then left alone")
@@ -500,7 +538,7 @@ step("late joiners see the dark deck, with no sound", function()
     pump()
     RunTo(M.time + 3)
     check(near(floor(lateCl), K), "dark for the joiner")
-    check(isBlack(lateCl, CORRIGATED), "lights off for the joiner")
+    check(isOff(lateCl, CORRIGATED), "lights off for the joiner")
     check(#lateCl.sounds == 0, "no sound")
     clients[late] = nil
 end)
