@@ -47,3 +47,42 @@ function LE.FindDeck(pos)
     end
     return best
 end
+
+-- Whether a position is within `distance` of any section box: inside the ship,
+-- as opposed to the hull's outside, the skybox or anything else off the decks.
+-- Uses a grid of the boxes so it stays cheap for whole maps' worth of checks.
+local CELL = 512
+local grid, gridDecks, gridDistance
+
+local function CellKey(x, y, z) return x .. " " .. y .. " " .. z end
+
+local function BuildGrid(decks, distance)
+    grid, gridDecks, gridDistance = {}, decks, distance
+    for _, deckData in pairs(decks) do
+        for _, section in pairs(deckData.Sections or {}) do
+            for _, area in ipairs(section.Areas or {}) do
+                for x = math.floor((area.Min.x - distance) / CELL), math.floor((area.Max.x + distance) / CELL) do
+                    for y = math.floor((area.Min.y - distance) / CELL), math.floor((area.Max.y + distance) / CELL) do
+                        for z = math.floor((area.Min.z - distance) / CELL), math.floor((area.Max.z + distance) / CELL) do
+                            local key = CellKey(x, y, z)
+                            grid[key] = grid[key] or {}
+                            table.insert(grid[key], area)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function LE.NearSection(pos, distance)
+    local decks = LE.GetDecks()
+    if not decks then return false end
+    if grid == nil or gridDecks ~= decks or gridDistance ~= distance then BuildGrid(decks, distance) end
+
+    local cell = grid[CellKey(math.floor(pos.x / CELL), math.floor(pos.y / CELL), math.floor(pos.z / CELL))]
+    for _, area in ipairs(cell or {}) do
+        if DistanceToBox(area, pos) <= distance then return true end
+    end
+    return false
+end

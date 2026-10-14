@@ -4,27 +4,49 @@ Lighting tools for Garry's Mod Star Trek RP, built on the section system of [Sta
 
 ## Power outages
 
-Cut power to a deck, and for everyone on it the lights stutter and die: the map's baked lighting goes dark, light fixtures go black, and players and props lose their light. Flashlights still work. Restore it and the lights struggle back on. Changing power never freezes the game.
+Cut power to a deck, and for everyone on it the lights stutter and die: the walls, floors, static props, doors, props and players lose their light, cubemap reflections dim, and everything that glows goes out. STM's LCARS screens, force fields and alert lights stay on and light up the dark around them. Flashlights still work. Restore it and the lights struggle back on. Changing power never freezes the game.
 
 ### Why it doesn't freeze
 
 The usual way to darken a map is to change its baked lighting (`engine.LightStyle`) and rebuild it with `render.RedownloadAllLightmaps()`. That rebuild re-uploads every lightmap on the map, a freeze of a fraction of a second to several seconds, every single time. It's also map-wide for everyone at once.
 
-This addon never rebuilds anything. In Source, a world material's `$color` multiplies exactly the light that comes from its lightmap (`LightmappedGeneric` scales its lightmap lighting by it). So on each player's own game:
-- **World:** every lightmapped world and brush-entity material (doors, hatches) has its `$color` turned down, so walls and floors lose their baked light. Changing a material parameter costs nothing, so it fades smoothly frame by frame.
-- **Light fixtures:** the materials in `Config.LightMaterials` go fully black (color, glow and reflections).
-- **Models:** players, NPCs and props are drawn with only a little flat light (`Config.ModelLight`) instead of the map's lighting.
+This addon never rebuilds anything. It changes material parameters, which costs nothing and can fade smoothly frame by frame. Each player's own game handles it, so only the people on a dark deck see it.
 
-It's per player: only the people on a dark deck see it, everyone else's game is untouched. It covers everything they see, so it doesn't matter that STM's sections don't cover every corridor. Walking or riding a turbolift onto a deck with different power fades over half a second.
+### What goes dark, and how
+
+| | How | |
+|---|---|---|
+| Walls, floors, brush doors | `$color` | Source multiplies a world material's `$color` into exactly the light from its lightmap, so only the baked light goes. Flashlights are drawn in a separate pass it doesn't touch. |
+| Cubemap reflections | `$envmaptint` | On world and model materials. |
+| Static props, props, doors, NPCs, weapons | `$color2`, `$phongboost` | Their lighting and their highlights. |
+| Players, your weapon and hands | dimmed while drawn | Player colors come from a material proxy that would undo a material change. |
+| Anything that glows | texture swapped for black | Self-illuminated, additive and unlit materials, sprites, and `Config.LightMaterials`. Swapping the texture beats material proxies that animate a color (STM's bridge lights use one). |
+| The map's light entities | switched off by the server | Named lights, `light_dynamic`, `env_projectedtexture`, `point_spotlight`, and the sprites and glows on fixtures, on that deck. Ones that were already off stay off. |
+
+**Only the inside of the ship.** After you join, the addon reads the map file (read-only, in the background, a couple of milliseconds per frame at most) to find which material every surface uses and where, and where every static prop is. Then:
+- World materials with at least half their area within `InteriorDistance` (96 units) of a section box are darkened.
+- Static props, props and entities within that distance are darkened.
+- The hull's outside, the 3D skybox, the sky and STM's exterior (its planets and ships) are left alone, along with anything matching `Config.KeepMaterials`.
+
+If the map file can't be read, it falls back to every material the world uses.
+
+### STM's light sources
+
+These keep running with the power out, and give off real dynamic light. While the deck is dark, their light is raised by the same amount everything else is dimmed, so they light the room as brightly as they would with the power on. The nearest 12 are lit (`Config.Emitters.MaxLights`).
+- **LCARS screens:** light the average color of what they show, from their face outward. A bigger screen lights a bigger area. During red alert they light STM's red.
+- **Force fields:** light the color of their texture. The average color comes from the texture file, tinted by the material and the field's own color.
+- **Alert lights:** every fixture using STM's alert material (`light_alarm`) lights the alert's color while an alert is on.
+
+STM's alerts switch the bridge lights back on when they change; the server switches them back off if the bridge's deck has no power, and red alert's dimmed bridge lights stay off when power returns.
 
 ### Which deck you're on
 
-Inside one of STM's section boxes, that section's deck. Outside them (corridors and rooms the sections miss), the deck whose overall extent contains you, with `Config.DeckPadding` (64 units) to spare. In a turbolift shaft or anywhere else outside every deck, you stay on the last deck you were on.
+Inside one of STM's section boxes, that section's deck. Outside them (corridors and rooms the sections miss), the deck whose overall extent contains you, with `Config.DeckPadding` (64 units) to spare. In a turbolift shaft or anywhere else outside every deck, you stay on the last deck you were on. Arriving on a deck with different power fades over half a second.
 
 ### Requirements
 
 - **Star Trek Modules**, with its sections set up for your map (the map's `section<deck>_<id>` triggers). The addon uses STM's own section data, which STM syncs to every client.
-- Nothing about the map itself is decompiled or edited, so protected maps are fine.
+- Nothing about the map is changed, so protected maps are fine.
 
 ### Commands
 
@@ -48,25 +70,29 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 ### Settings
 
 `lua/lighting_editor/sh_config.lua` has:
-- **`DarkLevel`:** how much baked light a dead deck loses (0.92 by default).
-- **`LightMaterials`:** materials that go black with the power. Add your map's light fixtures here; on a test server, `sv_cheats 1` and `mat_crosshair 1` show the material you look at.
-- **`DarkenModels` and `ModelLight`:** whether models go dark, and how much light they keep.
-- **Timing:** flicker and fade times, and `DeckChangeTime`.
-- **`DeckPadding`** and **sounds.**
+- **`DarkLevel`:** how much light a dead deck loses (0.92 by default).
+- **`LightMaterials`:** materials that go black with the power, on top of everything that glows. On a test server, `sv_cheats 1` and `mat_crosshair 1` show the material you're looking at.
+- **`KeepMaterials`, `KeepClasses`:** materials (name patterns) and entity classes never touched. Add your hull's exterior materials if any get darkened.
+- **`InteriorDistance`:** how close to a section counts as inside the ship.
+- **`Emitters`:** brightness and reach of LCARS screens, force fields and alert lights, and how many are lit.
+- **`MapLights`:** which map light entities the server switches off, and how.
+- **Timing:** flicker and fade times, and `DeckChangeTime`. Also `DeckPadding` and sounds.
 
 ### Limits
 
-- **Only lightmapped surfaces darken through `$color`.** That's almost every wall and floor. Materials with their own glow (`$selfillum`) keep it unless they're in `LightMaterials`; unlit and water materials don't change.
-- **Dark models are evenly lit:** while the lights are out, models lose their shading direction along with their light.
-- **Materials are shared:** a material darkens everywhere the player can see it, so someone on a dark deck looking through a window at a lit one sees it dark too.
+- **Materials are shared:** a material darkens everywhere the player can see it, so someone on a dark deck looking through a window at a lit deck sees it dark too.
+- **Emitter light on LDR:** emitters' boosted light needs HDR lightmaps (most maps) to reach full brightness in the dark; on an LDR map it's capped lower.
+- **Other addons' lights:** dynamic lights and projected textures from other addons (like flashlights) aren't touched.
 
 ## Tests
 
-`tests/` runs the real addon files in a mock Garry's Mod, with simulated materials:
-- **Materials:** the exact values written to each material: dark on a dead deck, lit fixtures black, untouched shaders left alone, exact originals back on restore, and no writes at all while nothing changes.
-- **Decks:** deck lookup (sections, the gaps between them, turbolift shafts), fades when changing deck, and that players on powered decks see nothing.
+`tests/` runs the real addon files in a mock Garry's Mod, with simulated materials and real binary game files (a map, models and a texture, built byte for byte by `tests/files.lua`):
+- **Map reading:** face materials, centers and areas, skipped sky and nodraw faces, static props, model materials and texture colors, and the fallback when the map can't be read.
+- **Darkening:** the exact values written to every kind of material. It checks what's left alone (the hull's outside, the skybox, STM's exterior, force fields, the alert material) and that everything returns to its exact original on restore. It also checks that nothing is written while nothing changes, and that the background scan is spread over frames.
+- **Emitters:** LCARS, force field and alert light colors, placement, size and brightness, and the light cap.
+- **Server:** map lights switched off and back on per deck, lights that were already off, and STM's alert and bridge lights.
 - **Never freezes:** the mock errors if anything calls `engine.LightStyle` or `render.RedownloadAllLightmaps`.
-- **Everything else:** flicker timing, model lighting, late joiners, sounds, commands, permissions and Helix commands.
+- **Everything else:** decks, flicker timing, fades, late joiners, sounds, commands, permissions and Helix commands.
 
 ```
 lua5.1 tests/run.lua

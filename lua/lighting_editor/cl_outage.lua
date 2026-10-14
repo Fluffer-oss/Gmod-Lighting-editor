@@ -1,15 +1,11 @@
 local LE = LightingEditor
 local Config = LE.Config
 
--- A deck without power goes dark for the players on it, by turning down the
--- map's real baked light rather than dimming the screen:
---  * World brushes: their material's $color scales only the light that comes
---    from the lightmap (LightmappedGeneric multiplies it into the lightmap
---    lighting), so walls and floors lose their baked light while flashlights
---    still work. Nothing is rebuilt: lightmaps are never redownloaded, so it
---    never freezes, and it can fade smoothly frame by frame.
---  * Light fixtures (Config.LightMaterials) go fully black.
---  * Models (players, props) get almost no light (Config.ModelLight).
+-- A deck without power goes dark for the players on it: the ship's surfaces,
+-- props and entities lose their light and everything that glows goes out
+-- (cl_materials.lua), while STM's screens, force fields and alert lights keep
+-- shining (cl_emitters.lua). Nothing is rebuilt (lightmaps are never
+-- redownloaded), so it never freezes and it fades smoothly frame by frame.
 -- It applies to everything a player on a dark deck sees, so it doesn't matter
 -- whether STM's sections cover every corridor; it ends when they leave the deck.
 
@@ -79,96 +75,17 @@ function LE.DeckDarkness(entry, now)
     return dark * 0.4 * math.max(0, 1 - (t - Config.FlickerInTime) / Config.FadeInTime)
 end
 
---------------------------------------------------------------------------------
--- Materials
---------------------------------------------------------------------------------
-
--- Original values of every parameter we change, so restoring is exact.
--- material name -> { mat = IMaterial, params = { [param] = Vector } }
-LE.Originals = LE.Originals or {}
-
-local function Track(name, params)
-    local tracked = LE.Originals[name]
-    if tracked then return tracked end
-
-    local mat = Material(name)
-    if not mat or mat:IsError() then return nil end
-    tracked = { mat = mat, params = {} }
-    for param, required in pairs(params) do
-        local value = mat:GetVector(param)
-        if value then
-            tracked.params[param] = Vector(value)
-        elseif required then
-            tracked.params[param] = Vector(1, 1, 1)
-        end
-    end
-    LE.Originals[name] = tracked
-    return tracked
-end
-
-local function Scale(tracked, factor)
-    for param, original in pairs(tracked.params) do
-        tracked.mat:SetVector(param, original * factor)
-    end
-end
-
--- Lightmapped world materials (the world and brush entities like doors),
--- found when a deck first goes dark for us.
-local worldMaterials, lightMaterials
-
-local function IsLightmapped(mat)
-    local shader = string.lower(mat:GetShader() or "")
-    return shader:find("lightmapped", 1, true) or shader:find("worldvertextransition", 1, true)
-end
-
-local function CollectMaterials()
-    lightMaterials = {}
-    local isLight = {}
-    for _, name in ipairs(Config.LightMaterials) do
-        isLight[string.lower(name)] = true
-        local tracked = Track(name, { ["$color"] = true, ["$color2"] = true, ["$selfillumtint"] = false, ["$envmaptint"] = false })
-        if tracked then table.insert(lightMaterials, tracked) end
-    end
-
-    worldMaterials = {}
-    local seen = {}
-    local function Add(names)
-        for _, name in ipairs(names or {}) do
-            local key = string.lower(name)
-            if not seen[key] and not isLight[key] then
-                seen[key] = true
-                local mat = Material(name)
-                if mat and not mat:IsError() and IsLightmapped(mat) then
-                    table.insert(worldMaterials, Track(name, { ["$color"] = true }))
-                end
-            end
-        end
-    end
-    Add(game.GetWorld():GetMaterials())
-    for _, ent in ipairs(ents.GetAll()) do
-        local model = ent:GetModel()
-        if model and model:sub(1, 1) == "*" then Add(ent:GetMaterials()) end
-    end
-end
-
-local applied = 0
+local applied
 
 -- darkness: 0 (normal) to Config.DarkLevel (no power).
 local function Apply(darkness)
     -- Skip changes too small to see; the end points are always exact.
     if darkness == applied then return end
-    if math.abs(darkness - applied) < 1 / 256 and darkness ~= 0 and darkness ~= Config.DarkLevel then return end
-    if not worldMaterials then CollectMaterials() end
-
-    local out = Config.DarkLevel > 0 and math.min(1, darkness / Config.DarkLevel) or 0
-    for _, tracked in ipairs(worldMaterials) do Scale(tracked, 1 - darkness) end
-    for _, tracked in ipairs(lightMaterials) do Scale(tracked, 1 - out) end
+    if applied and math.abs(darkness - applied) < 1 / 128 and darkness ~= 0 and darkness ~= Config.DarkLevel then return end
     applied = darkness
 
-    if darkness == 0 then
-        -- Fully back to normal: pick up any new brush entities next time.
-        worldMaterials, lightMaterials = nil, nil
-    end
+    local out = Config.DarkLevel > 0 and math.min(1, darkness / Config.DarkLevel) or 0
+    LE.SetLighting(1 - darkness, out >= 0.5)
 end
 
 --------------------------------------------------------------------------------
@@ -207,28 +124,21 @@ hook.Add("Think", "LightingEditor.Outages", function()
     end
 
     Apply(current)
+    LE.CurrentDarkness = current
 end)
 
--- Models: the engine lights them from the map's baked lighting, which the
--- materials above don't reach, so while the lights are out they're drawn with
--- only a little flat light instead.
-local modelsDark = false
-
-hook.Add("PreDrawOpaqueRenderables", "LightingEditor.Models", function(drawingDepth, drawingSkybox, drawing3DSkybox)
-    modelsDark = false
-    if not Config.DarkenModels or drawingDepth or drawingSkybox or drawing3DSkybox then return end
-    if Config.DarkLevel <= 0 or current < Config.DarkLevel * 0.5 then return end
-
-    local light = Config.ModelLight
-    render.SuppressEngineLighting(true)
-    render.ResetModelLighting(light, light, light)
-    render.SetLocalModelLights({})
-    modelsDark = true
-end)
-
-hook.Add("PostDrawTranslucentRenderables", "LightingEditor.Models", function()
-    if modelsDark then
-        render.SuppressEngineLighting(false)
-        modelsDark = false
-    end
-end)
+-- Players (whose colors come from a material proxy that would undo a material
+-- change), your weapon and your hands: dimmed while they're drawn.
+local function Dim()
+    local k = 1 - current
+    if k < 1 then render.SetColorModulation(k, k, k) end
+end
+local function Undim()
+    if current > 0 then render.SetColorModulation(1, 1, 1) end
+end
+hook.Add("PrePlayerDraw", "LightingEditor.Dim", Dim)
+hook.Add("PostPlayerDraw", "LightingEditor.Dim", Undim)
+hook.Add("PreDrawViewModel", "LightingEditor.Dim", Dim)
+hook.Add("PostDrawViewModel", "LightingEditor.Dim", Undim)
+hook.Add("PreDrawPlayerHands", "LightingEditor.Dim", Dim)
+hook.Add("PostDrawPlayerHands", "LightingEditor.Dim", Undim)

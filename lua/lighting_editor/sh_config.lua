@@ -2,8 +2,8 @@ LightingEditor = LightingEditor or {}
 local LE = LightingEditor
 
 LE.Config = {
-    -- How much of the map's baked light is lost on a deck without power
-    -- (0 = none, 1 = pitch black). Flashlights are unaffected.
+    -- How much light a deck without power loses (0 = none, 1 = pitch black).
+    -- Flashlights are unaffected.
     DarkLevel = 0.92,
 
     -- Light fixtures: these materials go fully black when the power is out.
@@ -23,10 +23,39 @@ LE.Config = {
         "kingpommes/startrek/intrepid/wall_corrigated"
     },
 
-    -- Players, props and other models on a dark deck are lit by only this much
-    -- ambient light (0-1). Set DarkenModels = false to leave them alone.
-    DarkenModels = true,
-    ModelLight = 0.04,
+    -- Materials never touched: the sky, tool textures, and anything with
+    -- these patterns in its name (Lua patterns). Add your hull's exterior
+    -- materials here if any of them get darkened.
+    KeepMaterials = { "^skybox/", "^tools/", "exterior" },
+    -- Entity classes never touched (STM's own light sources and things drawn separately).
+    KeepClasses = {
+        force_field = true, player = true, viewmodel = true, gmod_hands = true,
+        env_sprite = true, env_lightglow = true, env_glow = true, beam = true, env_beam = true
+    },
+
+    -- Surfaces, props and entities this close to a section box count as inside
+    -- the ship. Everything further out (the hull's outside, the skybox, STM's
+    -- exterior) is left alone. A world material is darkened if at least half its
+    -- area is inside.
+    InteriorDistance = 96,
+
+    -- Finding everything to darken happens in the background after joining,
+    -- this many seconds per frame at most, so it never causes a hitch.
+    ScanBudget = 0.002,
+
+    -- Light sources that keep shining in the dark (STM keeps them powered).
+    -- Each gives off real dynamic light; the nearest few are lit.
+    Emitters = {
+        MaxLights = 12,
+        Distance = 2000,
+        -- LCARS screens: light the color of what they show, from their face,
+        -- sized by the screen.
+        LCARS = { Brightness = 0.6, RadiusPerUnit = 3, MinRadius = 48, MaxRadius = 220 },
+        -- Force fields: light the color of their texture.
+        ForceFields = { Brightness = 1.2, RadiusScale = 1.2, MinRadius = 80, MaxRadius = 300 },
+        -- STM alert lights: the alert's color, from every fixture using the alert material.
+        Alert = { Brightness = 1.5, Radius = 180 }
+    },
 
     -- Transitions.
     FlickerOutTime = 1.4,          -- lights stutter before dying
@@ -38,6 +67,24 @@ LE.Config = {
     -- How far outside a deck's section boxes still counts as that deck
     -- (sections don't always cover every corridor).
     DeckPadding = 64,
+
+    -- The map's own light entities on a deck without power are switched off
+    -- (by the server, so everyone sees it): class -> the inputs that switch it
+    -- off and on, and how to tell it's on; or "hide" for glows and sprites,
+    -- which are hidden instead. Ones that were already off are left alone.
+    MapLights = {
+        light = { off = "TurnOff", on = "TurnOn", startsOff = 1 },  -- named (switchable) lights
+        light_spot = { off = "TurnOff", on = "TurnOn", startsOff = 1 },
+        light_dynamic = { off = "TurnOff", on = "TurnOn", state = "m_On" },
+        env_projectedtexture = { off = "TurnOff", on = "TurnOn", state = "m_bState" },
+        point_spotlight = { off = "LightOff", on = "LightOn", state = "m_bSpotlightOn" },
+        env_sprite = "hide",
+        env_sprite_oriented = "hide",
+        env_lightglow = "hide",
+        env_glow = "hide",
+        beam = "hide",
+        env_beam = "hide"
+    },
 
     Sounds = {
         Out = "ambient/energy/spark6.wav",

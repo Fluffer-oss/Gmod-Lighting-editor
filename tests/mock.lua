@@ -22,17 +22,20 @@ function VEC:Dot(o) return self.x * o.x + self.y * o.y + self.z * o.z end
 function VEC:Cross(o) return Vector(self.y * o.z - self.z * o.y, self.z * o.x - self.x * o.z, self.x * o.y - self.y * o.x) end
 function VEC:Length() return math.sqrt(self:Dot(self)) end
 function VEC:DistToSqr(o) local d = self - o return d:Dot(d) end
+function VEC:Distance(o) return (self - o):Length() end
 function VEC:GetNormalized() local l = self:Length() return Vector(self.x / l, self.y / l, self.z / l) end
 M.Vector = Vector
 
 local COLOR = {}
 local function Color(r, g, b, a) return setmetatable({ r = r, g = g, b = b, a = a or 255 }, COLOR) end
+M.Color = function(...) return Color(...) end
 
 ---------------------------------------------------------------- shared world
 M.queueToServer, M.queueToClients, M.pooled = {}, {}, {}
 M.time = 100
 M.errors = {}
-M.materials, M.worldMaterials, M.entities = {}, {}, {}
+M.materials, M.worldMaterials, M.entities, M.serverEntities, M.files = {}, {}, {}, {}, {}
+M.sysTime, M.sysTimeStep = 0, 0.00005
 
 function M.MakePlayer(name, admin)
     local p = { __valid = true, name = name, admin = admin, pos = Vector(0, 0, 0), chat = {} }
@@ -111,42 +114,99 @@ function M.NewRealm(isServer, localPlayer)
         assert(#inc.fields == 0, "unread fields left in " .. msg.name)
     end
 
-    if not isServer then
+    env.isstring = function(v) return type(v) == "string" end
+    env.isfunction = function(v) return type(v) == "function" end
+    env.timer = { Simple = function(_, f) f() end }
+
+    -- Read-only game files: M.files[path] = bytes.
+    env.file = { Open = function(path, mode, where)
+        assert(mode == "rb" and where == "GAME", "files are only read")
+        local data = M.files[path]
+        if not data then return nil end
+        local pos = 0
+        return {
+            Read = function(_, n) local chunk = data:sub(pos + 1, pos + n) pos = pos + #chunk return chunk end,
+            Seek = function(_, p) pos = p end,
+            Size = function() return #data end,
+            Close = function() end
+        }
+    end }
+
+    if isServer then
+        env.ents = { FindByClass = function(class)
+            local found = {}
+            for _, ent in ipairs(M.serverEntities) do if ent.class == class then table.insert(found, ent) end end
+            return found
+        end }
+    else
         env.LocalPlayer = function() return localPlayer end
+        env.EyePos = function() return localPlayer:EyePos() end
+        env.SysTime = function() M.sysTime = M.sysTime + M.sysTimeStep return M.sysTime end
         env.sounds = {}
         env.surface = { PlaySound = function(snd) table.insert(env.sounds, snd) end }
 
-        -- Materials: M.materials[name] = { shader = "...", params = { ["$color"] = Vector } }.
-        -- Each client has its own copy of the materials, like separate games.
+        -- Materials, simulated: M.materials[name] = { shader, params = { [param] = value } }.
+        -- Each client has its own copy, like separate games.
         env.materialDefs = {}
         for name, def in pairs(M.materials) do
             local params = {}
-            for k, v in pairs(def.params) do params[k] = Vector(v) end
+            for k, v in pairs(def.params) do params[k] = getmetatable(v) == VEC and Vector(v) or v end
             env.materialDefs[name] = { shader = def.shader, params = params }
         end
         env.materialWrites = 0
         env.Material = function(name)
             local def = env.materialDefs[string.lower(name)]
             local mat = {}
-            function mat:IsError() return def == nil end
-            function mat:GetShader() return def and def.shader end
-            function mat:GetVector(param) local v = def and def.params[param] return v and Vector(v) or nil end
-            function mat:SetVector(param, v)
-                assert(def, "SetVector on a missing material")
-                def.params[param] = Vector(v)
+            local function get(param, kind)
+                local v = def and def.params[param]
+                if v == nil then return nil end
+                if kind == "vector" then assert(getmetatable(v) == VEC, param .. " isn't a vector") return Vector(v) end
+                if kind == "number" then assert(type(v) == "number", param .. " isn't a number") return v end
+                if kind == "string" then return type(v) == "table" and v.textureName or tostring(v) end
+                return v
+            end
+            local function set(param, v)
+                assert(def, "writing to a missing material")
+                def.params[param] = v
                 env.materialWrites = env.materialWrites + 1
             end
+            function mat:IsError() return def == nil end
+            function mat:GetShader() return def and def.shader end
+            function mat:GetVector(param) return get(param, "vector") end
+            function mat:GetInt(param) local v = get(param, "number") return v and math.floor(v) end
+            function mat:GetFloat(param) return get(param, "number") end
+            function mat:GetString(param) return get(param, "string") end
+            function mat:GetTexture(param) return get(param) end
+            function mat:SetVector(param, v) assert(getmetatable(v) == VEC) set(param, Vector(v)) end
+            function mat:SetFloat(param, v) assert(type(v) == "number") set(param, v) end
+            function mat:SetTexture(param, t) assert(type(t) == "table" and t.textureName, "SetTexture needs a texture") set(param, t) end
             return mat
         end
+        env.renderTargets = {}
+        env.GetRenderTarget = function(name)
+            env.renderTargets[name] = env.renderTargets[name] or { textureName = name, cleared = nil }
+            return env.renderTargets[name]
+        end
         env.game.GetWorld = function() return { GetMaterials = function() return M.worldMaterials end } end
-        env.ents = { GetAll = function() return M.entities end }
+        local function clientEnts() local t = {} for _, e in ipairs(M.entities) do if e.__valid then table.insert(t, e) end end return t end
+        env.ents = {
+            GetAll = clientEnts,
+            FindByClass = function(class)
+                local found = {}
+                for _, ent in ipairs(clientEnts()) do if ent:GetClass() == class then table.insert(found, ent) end end
+                return found
+            end
+        }
+        env.dlights = {}
+        env.DynamicLight = function(index) env.dlights[index] = env.dlights[index] or {} return env.dlights[index] end
 
-        local lighting = { suppressed = false }
-        env.modelLighting = lighting
+        local target
+        env.modulation = { 1, 1, 1 }
         env.render = {
-            SuppressEngineLighting = function(v) lighting.suppressed = v end,
-            ResetModelLighting = function(r, g, b) lighting.ambient = { r, g, b } end,
-            SetLocalModelLights = function(t) lighting.locals = t end,
+            PushRenderTarget = function(rt) target = rt end,
+            Clear = function(r, g, b, a) assert(target) target.cleared = { r, g, b, a } end,
+            PopRenderTarget = function() target = nil end,
+            SetColorModulation = function(r, g, b) env.modulation = { r, g, b } end,
             RedownloadAllLightmaps = function() error("lightmaps must never be redownloaded") end
         }
         env.engine = { LightStyle = function() error("light styles must never be changed") end }
