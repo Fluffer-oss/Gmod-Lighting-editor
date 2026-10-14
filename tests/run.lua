@@ -112,6 +112,10 @@ step("steady darkness: only surfaces inside the dark section", function()
     check(d.corridorFloorA == 0 and d.corridorFloorB == 0 and d.engineFloor == 0, "other sections untouched")
     check(d.outsideFloor == 0, "outside the ship untouched")
     check(balanced(crewCl), "render state restored")
+    local tinted = false
+    for _, px in ipairs(M.pixels) do if px.tint then tinted = true end end
+    check(not tinted, "darkening only: no colored tint anywhere")
+    check(#crewCl.sprites == 0 and next(crewCl.dlights) == nil, "no glow sprites or extra lights")
 end)
 
 step("looking at the dark bridge from engineering, through the corridor", function()
@@ -150,17 +154,6 @@ step("flicker, then fade, then steady", function()
     check(math.abs(LE.SectionDarkness(entry, 260) - DARK) < 1e-9, "then holds at full darkness")
     local restored = { deck = 1, sectionId = 500, out = false, changedAt = 300 }
     check(LE.SectionDarkness(restored, 300 + LE.Config.FlickerInTime + LE.Config.FadeInTime + 0.1) == 0, "restored section ends fully lit")
-end)
-
-step("emergency lighting after the flicker", function()
-    M.time = 300
-    server.RunCmd(admin, "lighting_outage", { "1", "5" })
-    pump()
-    crewCl.sprites = {}
-    Frame(crewCl, V(256, 128, 64), points())
-    local engineGlowsDuringFlicker = 0
-    for _, s in ipairs(crewCl.sprites) do if s.pos.x > 768 then engineGlowsDuringFlicker = engineGlowsDuringFlicker + 1 end end
-    check(engineGlowsDuringFlicker == 0, "no emergency glow while lights are still flickering")
 end)
 
 step("restore power", function()
@@ -232,48 +225,6 @@ step("only the nearest few dark sections are drawn", function()
     crewCl.render.ClearStencil = real
     check(drawCount == LE.Config.MaxSectionsDrawn, "drew " .. drawCount .. " sections, cap is " .. LE.Config.MaxSectionsDrawn)
     for i = 1, 20 do decks[1].Sections[1000 + i] = nil LE.ClientOutages["1:" .. (1000 + i)] = nil end
-end)
-
-step("emergency lights on real fixtures, capped", function()
-    local LE = crewCl.LightingEditor
-    -- Fake fixture list through the public path: a map file isn't needed for this.
-    local fixtures = {}
-    for i = 1, 30 do fixtures[i] = { pos = V(20 + i * 15, 128, 120), color = crewCl.Color(255, 255, 255) } end
-    local real = LE.GetSectionLights
-    LE.GetSectionLights = function(deck, id) return (deck == 1 and id == 100) and fixtures or {} end
-    crewCl.dlights, crewCl.sprites = {}, {}
-    M.time = 800
-    Frame(crewCl, V(256, 128, 64), points())
-    local count = 0
-    for _ in pairs(crewCl.dlights) do count = count + 1 end
-    check(count == LE.Config.MaxEmergencyLights, "dynamic lights capped at " .. LE.Config.MaxEmergencyLights .. " (got " .. count .. ")")
-    check(#crewCl.sprites == 30, "a glow on every fixture in the dark section")
-    LE.GetSectionLights = real
-end)
-
-step("real map files: light fixtures out of the .bsp", function()
-    local showroom = os.getenv("STM_SHOWROOM_BSP")
-    local tf2 = os.getenv("TF2_TEST_BSP")
-    if not showroom and not tf2 then
-        print("  (skipped: set STM_SHOWROOM_BSP / TF2_TEST_BSP to real .bsp paths)")
-        return
-    end
-    local LE = crewCl.LightingEditor
-    if showroom then
-        M.maps["maps/stm_showroom.bsp"] = showroom
-        local lights = LE.ReadMapLights("maps/stm_showroom.bsp")
-        check(lights and #lights == 584, "stm_showroom: 385 point + 199 spot lights from the HDR lump (got " .. tostring(lights and #lights) .. ")")
-        local first = lights and lights[1]
-        check(first and first.pos.x == 560 and first.pos.y == 208 and first.pos.z == 88, "first light at (560, 208, 88) like the independent reader")
-        check(first and first.color.r == 255 and math.abs(first.color.b - 255 * 324.598388671875 / 392.1568908691406) < 0.01, "light color normalized from intensity")
-    end
-    if tf2 then
-        M.maps["maps/test2.bsp"] = tf2
-        local lights = LE.ReadMapLights("maps/test2.bsp")
-        check(lights and #lights == 2, "test2: the 2 spotlights from the LDR lump, sky lights skipped")
-    end
-    local missing, err = LE.ReadMapLights("maps/nope.bsp")
-    check(missing == nil and err:find("can't open"), "missing map explained")
 end)
 
 step("Helix chat commands", function()

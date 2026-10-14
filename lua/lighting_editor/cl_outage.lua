@@ -4,8 +4,8 @@ local Config = LE.Config
 -- A section without power is darkened on screen, not in the map's baked
 -- lighting: every frame, the stencil buffer marks the pixels whose surface lies
 -- inside that section's boxes (world, props, players alike), and only those
--- pixels are darkened and washed red. A few draw calls per section, so turning
--- power off or on never rebuilds lightmaps and never freezes the game.
+-- pixels are darkened. A few draw calls per section, so turning power off or on
+-- never rebuilds lightmaps and never freezes the game.
 
 LE.ClientOutages = LE.ClientOutages or {}
 
@@ -14,7 +14,6 @@ local VolumeMaterial = CreateMaterial("lightingeditor_volume", "UnlitGeneric", {
     ["$vertexcolor"] = 1,
     ["$nocull"] = 1
 })
-local GlowMaterial = Material("sprites/light_glow02_add")
 
 --------------------------------------------------------------------------------
 -- State
@@ -89,14 +88,6 @@ function LE.SectionDarkness(entry, now)
         return Flicker(t, seed) and dark or dark * 0.4
     end
     return dark * 0.4 * math.max(0, 1 - (t - Config.FlickerInTime) / Config.FadeInTime)
-end
-
-local function EmergencyPulse(entry, now)
-    if not entry.out then return 0 end
-    local t = now - entry.changedAt - Config.FlickerOutTime
-    if t <= 0 then return 0 end
-    local fadeIn = math.min(1, t / Config.FadeOutTime)
-    return fadeIn * (0.55 + 0.45 * math.sin(now * math.pi * 2 / Config.PulsePeriod))
 end
 
 --------------------------------------------------------------------------------
@@ -188,7 +179,7 @@ local function MarkBox(min, max, eye)
     FullScreen(color_white)
 end
 
-local function DrawSectionDarkness(section, darkness, pulse, eye)
+local function DrawSectionDarkness(section, darkness, eye)
     render.SetStencilEnable(true)
     render.ClearStencil()
     render.SetStencilFailOperation(STENCIL_KEEP)
@@ -210,10 +201,6 @@ local function DrawSectionDarkness(section, darkness, pulse, eye)
     render.SetStencilZFailOperation(STENCIL_KEEP)
 
     FullScreen(Color(0, 0, 0, 255 * darkness))
-    if pulse > 0 then
-        local c = Config.EmergencyColor
-        FullScreen(Color(c.r, c.g, c.b, 255 * Config.EmergencyTint * pulse))
-    end
 
     render.SetStencilEnable(false)
 end
@@ -242,61 +229,11 @@ local function ActiveSections(eye, now)
     return active
 end
 
-local DrawnThisFrame = {}
-
 hook.Add("PostDrawTranslucentRenderables", "LightingEditor.Outages", function(drawingDepth, drawingSkybox, drawing3DSkybox)
     if drawingDepth or drawingSkybox or drawing3DSkybox then return end
 
-    local eye, now = EyePos(), CurTime()
-    DrawnThisFrame = ActiveSections(eye, now)
-
-    for _, item in ipairs(DrawnThisFrame) do
-        item.pulse = EmergencyPulse(item.entry, now)
-        DrawSectionDarkness(item.section, item.darkness, item.pulse, eye)
-    end
-
-    -- Red glows on the dead section's light fixtures, drawn after the darkening.
-    local glows = 0
-    render.SetMaterial(GlowMaterial)
-    for _, item in ipairs(DrawnThisFrame) do
-        if item.pulse > 0 then
-            local c = Config.EmergencyColor
-            local color = Color(c.r, c.g, c.b, 255 * item.pulse)
-            for _, light in ipairs(LE.GetSectionLights(item.entry.deck, item.entry.sectionId)) do
-                if glows >= Config.MaxFixtureGlows then break end
-                render.DrawSprite(light.pos, Config.FixtureGlowSize, Config.FixtureGlowSize, color)
-                glows = glows + 1
-            end
-        end
-    end
-end)
-
--- A few real (dynamic) red lights at the nearest dead fixtures, so the
--- emergency lighting actually lights the room around them.
-hook.Add("Think", "LightingEditor.EmergencyLights", function()
-    if #DrawnThisFrame == 0 then return end
-
     local eye = EyePos()
-    local candidates = {}
-    for _, item in ipairs(DrawnThisFrame) do
-        if item.pulse and item.pulse > 0 then
-            for _, light in ipairs(LE.GetSectionLights(item.entry.deck, item.entry.sectionId)) do
-                table.insert(candidates, { pos = light.pos, pulse = item.pulse, dist = eye:DistToSqr(light.pos) })
-            end
-        end
-    end
-    table.sort(candidates, function(a, b) return a.dist < b.dist end)
-
-    local c = Config.EmergencyColor
-    for i = 1, math.min(#candidates, Config.MaxEmergencyLights) do
-        local dlight = DynamicLight(4200 + i)
-        if dlight then
-            dlight.pos = candidates[i].pos
-            dlight.r, dlight.g, dlight.b = c.r, c.g, c.b
-            dlight.brightness = 0.6 + candidates[i].pulse
-            dlight.size = Config.EmergencyLightSize
-            dlight.decay = 0
-            dlight.dietime = CurTime() + 0.2
-        end
+    for _, item in ipairs(ActiveSections(eye, CurTime())) do
+        DrawSectionDarkness(item.section, item.darkness, eye)
     end
 end)

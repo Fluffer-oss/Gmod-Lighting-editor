@@ -6,16 +6,6 @@ LE.Config = {
     -- Flashlights inside a dark section are dimmed by the same amount.
     DarkLevel = 0.82,
 
-    -- Emergency lighting: a slow red pulse over the whole section, plus red
-    -- glows on the room's real light fixtures (read from the map file).
-    EmergencyColor = Color(255, 24, 12),
-    EmergencyTint = 0.10,          -- strength of the red wash at the top of a pulse
-    PulsePeriod = 2.4,             -- seconds per pulse
-    FixtureGlowSize = 22,
-    MaxFixtureGlows = 64,
-    MaxEmergencyLights = 6,        -- real dynamic lights at the nearest fixtures
-    EmergencyLightSize = 220,
-
     -- Transitions.
     FlickerOutTime = 1.4,          -- lights stutter before dying
     FadeOutTime = 1.0,
