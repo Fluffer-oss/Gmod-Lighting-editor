@@ -18,7 +18,7 @@ This addon never rebuilds anything. It changes material parameters, which costs 
 |---|---|---|
 | Walls, floors, brush doors | `$color` | Source multiplies a world material's `$color` into exactly the light from its lightmap, so only the baked light goes. Flashlights are drawn in a separate pass it doesn't touch. |
 | Cubemap reflections | `$envmaptint` | On world and model materials. |
-| Static props, props, doors, NPCs, weapons | `$color2`, `$phongboost` | Their lighting and their highlights. |
+| Static props, props, doors, NPCs, weapons | `$color2`, `$phongboost` | Their lighting and their highlights. Model shaders convert `$color2` (and `$envmaptint`, and the per-model color) from gamma to linear before using them, which world shaders don't, so models get the value that comes out as the same linear scale as the walls. Without that, props end up about 20× darker than the walls around them. |
 | Players, your weapon and hands | dimmed while drawn | Player colors come from a material proxy that would undo a material change. |
 | Anything that glows | texture swapped for black | Self-illuminated, additive and unlit materials, sprites, and `Config.LightMaterials`. Swapping the texture beats material proxies that animate a color (STM's bridge lights use one). Listed lights go out wherever they're used, including the copies the map compiler makes for cubemaps (`maps/<map>/<name>_x_y_z`). |
 | The map's light entities | switched off by the server | Named lights, `light_dynamic`, `env_projectedtexture`, `point_spotlight`, and the sprites and glows on fixtures, on that deck. Ones that were already off stay off. |
@@ -80,6 +80,7 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 ### Limits
 
 - **Materials are shared:** a material darkens everywhere the player can see it, so someone on a dark deck looking through a window at a lit deck sees it dark too.
+- **Flashlights on props:** on walls and floors the flashlight is unaffected, but a model's tint also scales the flashlight pass drawn on it, so props under a flashlight are as dim as the rest of their light. Only rebuilding the lighting (`engine.LightStyle` plus `render.RedownloadAllLightmaps`, which is what freezes) changes a static prop's baked light by itself.
 - **Other addons' lights:** dynamic lights and projected textures from other addons (like flashlights) aren't touched.
 
 ## Tests

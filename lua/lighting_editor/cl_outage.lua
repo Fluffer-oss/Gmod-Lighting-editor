@@ -128,10 +128,12 @@ hook.Add("Think", "LightingEditor.Outages", function()
 end)
 
 -- Players (whose colors come from a material proxy that would undo a material
--- change), your weapon and your hands: dimmed while they're drawn.
+-- change), your weapon and your hands: dimmed while they're drawn. Color
+-- modulation goes through the same gamma-to-linear conversion as $color2.
 local function Dim()
-    local k = 1 - current
-    if k < 1 then render.SetColorModulation(k, k, k) end
+    if current <= 0 then return end
+    local k = LE.ModelTint(1, 1 - current)
+    render.SetColorModulation(k, k, k)
 end
 local function Undim()
     if current > 0 then render.SetColorModulation(1, 1, 1) end

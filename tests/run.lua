@@ -242,6 +242,9 @@ boot()
 local Config = server.LightingEditor.Config
 local DARK = Config.DarkLevel
 local K = 1 - DARK
+-- What a model's $color2 must be for the shader (which converts it from gamma
+-- to linear, x^2.2) to scale its light by K, like the world's $color.
+local function MK(original) return ((original ^ 2.2) * K) ^ (1 / 2.2) end
 
 --------------------------------------------------------------------------------
 -- Tests
@@ -329,12 +332,15 @@ end)
 
 step("deck 1 without power: props, entities and glow", function()
     local c = crewCl
-    check(vnear(P(c, "models/props/console", "$color2"), K, K, K), "static prop dark")
+    check(vnear(P(c, "models/props/console", "$color2"), MK(1), MK(1), MK(1)), "static prop exactly as dark as the walls once the shader converts it")
+    check(near(P(c, "models/props/console", "$color2").x ^ 2.2, K), "(linear: " .. K .. ")")
     check(near(P(c, "models/props/console", "$phongboost"), 2 * K), "and its highlights")
-    check(vnear(P(c, "models/props/console", "$envmaptint"), K, K, K), "and its reflections")
+    check(vnear(P(c, "models/props/console", "$envmaptint"), MK(1), MK(1), MK(1)), "and its reflections")
     check(isBlack(c, "models/props/console_screen"), "static prop's glowing screen off")
     check(P(c, "models/props/asteroid", "$color2").x == 1, "3D skybox prop untouched")
-    check(vnear(P(c, "models/props/door_metal", "$color2"), 0.9 * K, 0.9 * K, 0.9 * K), "door (entity) dark")
+    check(vnear(P(c, "models/props/door_metal", "$color2"), MK(0.9), MK(0.9), MK(0.9)), "door (entity) dark, from its own color")
+    local LE = c.LightingEditor
+    check(near(LE.ModelTint(2, 0.75), 1.5) and near(LE.ModelTint(2, 0.25) ^ 2.2, 0.5), "overbright tints (above 1, which the shader leaves linear)")
     check(isBlack(c, "models/props/beam_cone"), "additive light cone (material override) off")
     check(P(c, "models/planets/earth", "$color2").x == 1, "STM exterior (planet far outside) untouched")
     check(P(c, "models/stm/forcefield", "$basetexture") == "stm/forcefield" and P(c, "models/stm/forcefield", "$color").x == 1, "force field untouched")
@@ -355,7 +361,7 @@ end)
 step("players, weapons and hands are dimmed while drawn", function()
     for _, pair in ipairs({ { "PrePlayerDraw", "PostPlayerDraw" }, { "PreDrawViewModel", "PostDrawViewModel" }, { "PreDrawPlayerHands", "PostDrawPlayerHands" } }) do
         crewCl.hook.Run(pair[1])
-        check(near(crewCl.modulation[1], K), pair[1] .. " dims")
+        check(near(crewCl.modulation[1], MK(1)), pair[1] .. " dims, like the props")
         crewCl.hook.Run(pair[2])
         check(crewCl.modulation[1] == 1, pair[2] .. " restores")
     end
@@ -378,7 +384,7 @@ step("new props are picked up while dark", function()
     local mug = Ent("prop_physics", "models/props/mug.mdl", V(120, 120, 40), { "models/props/mug" })
     table.insert(M.entities, mug)
     RunTo(M.time + 1.5)
-    check(near(P(crewCl, "models/props/mug", "$color2").x, K), "spawned mug dark")
+    check(near(P(crewCl, "models/props/mug", "$color2").x, MK(1)), "spawned mug dark")
     table.remove(M.entities)
 end)
 

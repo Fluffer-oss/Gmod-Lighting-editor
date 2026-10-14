@@ -9,6 +9,9 @@ local Config = LE.Config
 --         it doesn't touch); $envmaptint scales the cubemap reflections.
 --  model  Static props, props, doors, NPCs: $color2 scales their lighting,
 --         $envmaptint their cubemap reflections and $phongboost their highlights.
+--         Model shaders convert $color2 and $envmaptint from gamma to linear
+--         before using them (world shaders don't), so these get the value
+--         that comes out as the same linear scale as the world: see LE.ModelTint.
 --  glow   Anything that gives off its own light: self-illuminated, additive and
 --         unlit materials, sprites, and Config.LightMaterials. Its texture is
 --         swapped for black, which beats any material proxy that animates its
@@ -101,6 +104,20 @@ hook.Add("PreRender", "LightingEditor.BlackTexture", function()
     LE.SetLighting(LE.Lighting.k, LE.Lighting.lightsOff)
 end)
 
+-- The value to give a model's $color2 or $envmaptint so that, after the shader
+-- converts it to linear (GammaToLinear: x^2.2, values above 1 left as they
+-- are), it scales the light by k, the same as the world's $color.
+local GAMMA = 2.2
+function LE.ModelTint(original, k)
+    local linear = (original > 1 and original or original ^ GAMMA) * k
+    return linear > 1 and linear or linear ^ (1 / GAMMA)
+end
+
+local function ScaleVector(original, k, kind)
+    if kind ~= MODEL then return original * k end
+    return Vector(LE.ModelTint(original.x, k), LE.ModelTint(original.y, k), LE.ModelTint(original.z, k))
+end
+
 local function Apply(tracked)
     local lighting = LE.Lighting
     local mat = tracked.mat
@@ -121,8 +138,9 @@ local function Apply(tracked)
     if tracked.k == lighting.k then return end
     tracked.k = lighting.k
     for param, original in pairs(tracked.vectors) do
-        mat:SetVector(param, original * lighting.k)
+        mat:SetVector(param, ScaleVector(original, lighting.k, tracked.kind))
     end
+    -- $phongboost is used as it is: linear.
     for param, original in pairs(tracked.floats) do
         mat:SetFloat(param, original * lighting.k)
     end
