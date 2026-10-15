@@ -152,7 +152,7 @@ hook.Add("Think", "LightingEditor.Emitters", function()
     end
 
     -- Make up for some of the darkness on the surfaces they light.
-    local boost = math.min(1 / math.max(1 - (LE.CurrentDarkness or 0), 0.01), settings.MaxBoost)
+    local boost = math.min(1 / math.max(LE.LightLeft(1 - (LE.CurrentDarkness or 0), LE.MaterialKinds.WORLD), 0.01), settings.MaxBoost)
 
     for i = 1, math.min(#emitters, settings.MaxLights) do
         local emitter = emitters[i]

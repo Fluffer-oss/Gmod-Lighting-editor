@@ -127,6 +127,18 @@ function LE.ModelTint(original, k)
     return linear > 1 and linear or linear ^ (1 / GAMMA)
 end
 
+-- How much light is left (0-1) for a world surface ("world") or a model
+-- ("model") when the deck's overall light is k: models lose less than the
+-- walls (Config.PropDarkScale, or a quarter with Config.BarelyDarkenProps),
+-- and nothing goes below Config.MinLight.
+function LE.LightLeft(k, kind)
+    local loss = 1 - k
+    if kind == MODEL then
+        loss = loss * (Config.BarelyDarkenProps and 0.25 or math.Clamp(Config.PropDarkScale or 1, 0, 1))
+    end
+    return math.max(1 - loss, math.Clamp(Config.MinLight or 0, 0, 1))
+end
+
 local function ScaleVector(original, k, kind)
     if kind ~= MODEL then return original * k end
     return Vector(LE.ModelTint(original.x, k), LE.ModelTint(original.y, k), LE.ModelTint(original.z, k))
@@ -157,14 +169,16 @@ local function Apply(tracked)
         end
     end
 
-    if not tracked.kind or tracked.k == lighting.k then return end
-    tracked.k = lighting.k
+    if not tracked.kind then return end
+    local k = LE.LightLeft(lighting.k, tracked.kind)
+    if tracked.k == k then return end
+    tracked.k = k
     for param, original in pairs(tracked.vectors) do
-        mat:SetVector(param, ScaleVector(original, lighting.k, tracked.kind))
+        mat:SetVector(param, ScaleVector(original, k, tracked.kind))
     end
     -- $phongboost is used as it is: linear.
     for param, original in pairs(tracked.floats) do
-        mat:SetFloat(param, original * lighting.k)
+        mat:SetFloat(param, original * k)
     end
 end
 

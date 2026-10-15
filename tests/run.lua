@@ -255,10 +255,13 @@ local DECK1, DECK2 = V(256, 128, 0), V(256, 128, 300)
 boot()
 local Config = server.LightingEditor.Config
 local DARK = Config.DarkLevel
-local K = 1 - DARK
+-- Light left on a dead deck: walls lose DarkLevel, but never go below MinLight;
+-- props lose only PropDarkScale of what the walls lose.
+local K = math.max(1 - DARK, Config.MinLight)
+local KM = math.max(1 - DARK * Config.PropDarkScale, Config.MinLight)
 -- What a model's $color2 must be for the shader (which converts it from gamma
--- to linear, x^2.2) to scale its light by K, like the world's $color.
-local function MK(original) return ((original ^ 2.2) * K) ^ (1 / 2.2) end
+-- to linear, x^2.2) to scale its light by KM.
+local function MK(original) return ((original ^ 2.2) * KM) ^ (1 / 2.2) end
 
 --------------------------------------------------------------------------------
 -- Tests
@@ -347,8 +350,9 @@ end)
 step("deck 1 without power: props, entities and glow", function()
     local c = crewCl
     check(vnear(P(c, "models/props/console", "$color2"), MK(1), MK(1), MK(1)), "static prop exactly as dark as the walls once the shader converts it")
-    check(near(P(c, "models/props/console", "$color2").x ^ 2.2, K), "(linear: " .. K .. ")")
-    check(near(P(c, "models/props/console", "$phongboost"), 2 * K), "and its highlights")
+    check(near(P(c, "models/props/console", "$color2").x ^ 2.2, KM), "(linear: " .. KM .. ")")
+    check(near(P(c, "models/props/console", "$phongboost"), 2 * KM), "and its highlights")
+    check(KM > K + 0.2, "props keep more light than the walls (" .. KM .. " vs " .. K .. ")")
     check(vnear(P(c, "models/props/console", "$envmaptint"), MK(1), MK(1), MK(1)), "and its reflections")
     check(isBlack(c, "models/props/console_screen") == false and P(c, "models/props/console_screen", "$basetexture").textureName == "models/props/console_screen",
         "static prop's screen, self-illuminated but with no glow marked in its (empty) texture, kept")
@@ -622,6 +626,26 @@ step("here, ship, and bad decks", function()
     check(deck2Lamp.fired[#deck2Lamp.fired] == "TurnOn", "deck 2's lamp back on")
     server.RunCmd(admin, "lighting_outage", { "7" })
     check(admin.chat[#admin.chat]:find("no deck 7") ~= nil, "unknown deck explained")
+end)
+
+step("minimum light, and props darkened less", function()
+    local LE = crewCl.LightingEditor
+    local Config = LE.Config -- the client's own copy
+    local MODEL, WORLD = LE.MaterialKinds.MODEL, LE.MaterialKinds.WORLD
+    check(near(LE.LightLeft(1, WORLD), 1) and near(LE.LightLeft(1, MODEL), 1), "full power: everything at full light")
+    check(near(LE.LightLeft(0.08, WORLD), Config.MinLight), "walls never below MinLight")
+    check(near(LE.LightLeft(0.5, WORLD), 0.5), "above it, walls follow the deck's light")
+    check(near(LE.LightLeft(0.5, MODEL), 1 - 0.5 * Config.PropDarkScale), "props lose PropDarkScale of what the walls lose")
+    local saved = Config.MinLight
+    Config.MinLight = 0.7
+    check(near(LE.LightLeft(0.08, MODEL), 0.7), "props never below MinLight either")
+    Config.MinLight = saved
+
+    check(Config.BarelyDarkenProps == false, "BarelyDarkenProps is off by default")
+    Config.BarelyDarkenProps = true
+    check(near(LE.LightLeft(0.08, MODEL), 1 - 0.92 * 0.25), "with BarelyDarkenProps, props only dim a little")
+    check(near(LE.LightLeft(0.08, WORLD), Config.MinLight), "walls unchanged")
+    Config.BarelyDarkenProps = false
 end)
 
 step("Helix chat commands", function()

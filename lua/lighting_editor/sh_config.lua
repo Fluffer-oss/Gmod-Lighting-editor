@@ -6,6 +6,16 @@ LE.Config = {
     -- Flashlights are unaffected.
     DarkLevel = 0.92,
 
+    -- Nothing gets darker than this much of its normal light (0-1), walls and
+    -- props alike.
+    MinLight = 0.1,
+
+    -- Props, doors, NPCs and players lose only this fraction of the light the
+    -- walls lose (1 = just as dark as the walls, 0 = not darkened at all).
+    PropDarkScale = 0.6,
+    -- true: props only dim a little (they lose a quarter of what the walls lose).
+    BarelyDarkenProps = false,
+
     -- How a light fixture goes out: "glow" blacks out only its glowing parts
     -- (anything brighter than GlowThreshold, 0-1, and whatever the material
     -- marks as self-illuminated), keeping frames and detail; "black" blacks

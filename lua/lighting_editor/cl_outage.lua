@@ -132,7 +132,7 @@ end)
 -- modulation goes through the same gamma-to-linear conversion as $color2.
 local function Dim()
     if current <= 0 then return end
-    local k = LE.ModelTint(1, 1 - current)
+    local k = LE.ModelTint(1, LE.LightLeft(1 - current, LE.MaterialKinds.MODEL))
     render.SetColorModulation(k, k, k)
 end
 local function Undim()

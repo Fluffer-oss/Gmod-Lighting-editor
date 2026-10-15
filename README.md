@@ -83,6 +83,9 @@ hook.Add("LightingEditor.DeckPowerChanged", "x", function(deck, powered) end)
 
 `lua/lighting_editor/sh_config.lua` has:
 - **`DarkLevel`:** how much light a dead deck loses (0.92 by default).
+- **`MinLight`:** nothing gets darker than this much of its normal light, walls and props alike (0.1).
+- **`PropDarkScale`:** props, doors, NPCs and players lose only this fraction of the light the walls lose (0.6). 1 makes them just as dark as the walls; 0 leaves them alone.
+- **`BarelyDarkenProps`:** `true` makes props only dim a little (a quarter of what the walls lose). Off by default.
 - **`LightMaterials`:** materials that go black with the power, on top of everything that glows. On a test server, `sv_cheats 1` and `mat_crosshair 1` show the material you're looking at.
 - **`GlowOff`, `GlowThreshold`:** whether listed lights lose only their glowing parts or go all black, and how bright counts as glowing.
 - **`KeepMaterials`, `KeepClasses`:** materials (name patterns) and entity classes never touched (`core_effect` is in there). Add your hull's exterior materials if any get darkened.
